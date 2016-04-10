@@ -19,10 +19,25 @@ typedef enum
 } can_error_t;
 
 
+struct slc_queue_item 
+{
+    uint32  blocksize:12;
+    uint32  datalen:12;
+    uint32  unused:5;
+    uint32  sub_sof:1;
+    uint32  eof:1;
+    uint32  owner:1;
+    uint32  buf_ptr;
+    uint32  next_link_ptr;
+};
+
 class ESP8266Can
 {
 public:
     ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx);
+    void StartI2S();
+    void StopI2S();
+    void InitI2S();
     void StartRx();
     void Loop();
     ~ESP8266Can();
@@ -31,8 +46,13 @@ public:
     
     uint32_t cyclesBit() { return (uint32_t)(F_CPU / _rate); }
     uint32_t cyclesSample() { return (uint32_t)(cyclesBit() * BIT_SAMPLING_POINT / 100.0f); }
+    
+    uint32_t IntCount = 0;
 
 private:
+    struct slc_queue_item I2SBufferRx[8];
+    struct slc_queue_item I2SBufferTx[1];
+    
     uint32_t _rate; 
     uint8_t _gpio_tx;
     uint8_t _gpio_rx;
