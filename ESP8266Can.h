@@ -50,8 +50,11 @@ public:
     uint32_t IntCount = 0;
 
 private:
-    struct slc_queue_item I2SBufferRx[8];
-    struct slc_queue_item I2SBufferTx[1];
+    /* n queue items share the whole buffer */
+    struct slc_queue_item I2SQueueRx[1];
+    struct slc_queue_item I2SQueueTx[1];
+    uint32_t I2SBufferTxData[512/4];
+    uint32_t I2SBufferRxData[1024/4];
     
     uint32_t _rate; 
     uint8_t _gpio_tx;
@@ -62,6 +65,7 @@ private:
     uint32_t pinRegisterTx() { return _BV(_gpio_tx); }
     uint32_t pinRegisterRx() { return _BV(_gpio_rx); }
 
+    void PrepareQueue(const char *name, struct slc_queue_item *queue, uint32_t queueLength, void *buffer, uint32_t bufferLength, uint32_t eof);
     void CalcCRCBit(uint16_t *crc, uint16_t bit);
     uint16_t CalcCRC(uint8_t *data, uint16_t startBit, uint16_t bitCount);
     uint32_t BuildCanFrame(uint8_t *buffer, uint16_t id, uint8_t length, uint8_t *data, bool req_remote, bool self_ack);

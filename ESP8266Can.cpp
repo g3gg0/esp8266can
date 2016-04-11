@@ -41,8 +41,6 @@ static uint8_t int_buffer_pos = 0;
 static volatile uint32_t int_count = 0;
 static volatile uint32_t int_bits_set = 0;
 
-uint8_t I2SBufferTxData[512];
-uint8_t I2SBufferRxData[16384];
 
 
 extern "C"
@@ -300,31 +298,37 @@ extern "C"
 
     static void ICACHE_RAM_ATTR i2sInterrupt(ESP8266Can *can) 
     {
-        //can->IntCount++;
-        int_count++;
-        
         uint32_t slc_intr_status = READ_PERI_REG(SLC_INT_STATUS);
         WRITE_PERI_REG(SLC_INT_CLR, 0xFFFFFFFF);
         
         if(!slc_intr_status)
         {
-            Serial.printf("int %d, zero status: 0x%08X\n", int_count, slc_intr_status);       
+            Serial.printf("int %d, zero status: 0x%08X\n", int_count, slc_intr_status); 
+            return;            
         }
 
         if((slc_intr_status & SLC_RX_EOF_INT_ST))
         {
             struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_RX_EOF_DES_ADDR);
             
-            for(int pos = 0; pos < completed->blocksize / 4; pos++)
+            /* queue item filled and something in buffer changed. YAY! */
+            if(((uint8_t *)completed->buf_ptr)[0] != 0xDE)
             {
-                if(((uint32_t*)completed->buf_ptr)[pos] != 0)
-                {
-                    int_bits_set++;
-                }
+                /* reset, should be overwritten later again */
+                ((uint8_t *)completed->buf_ptr)[0] = 0xDE;
+                int_bits_set++;
             }
+            
+            int_count++;
             
             //Serial.printf("int %d, completed: 0x%08X\n", int_count, completed);        
             slc_intr_status &= ~SLC_RX_EOF_INT_ST;
+        }
+        
+        if((slc_intr_status & SLC_TX_EOF_INT_ST))
+        {
+            //Serial.printf("int %d, completed: 0x%08X\n", int_count, completed);        
+            slc_intr_status &= ~SLC_TX_EOF_INT_ST;
         }
         
         if(slc_intr_status)
@@ -341,7 +345,6 @@ ESP8266Can::ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx) :
     _maxTries(1024)
 {
     digitalWrite(_gpio_tx, HIGH);
-    pinMode(D6, INPUT);
     pinMode(_gpio_rx, INPUT);
     pinMode(_gpio_tx, OUTPUT);
 }
@@ -355,12 +358,9 @@ void ESP8266Can::StartRx()
     int_gpio_rx = pinRegisterRx();
     int_bit_time = cyclesBit();
     int_idle_time = 10 * int_bit_time;
-    //attachInterrupt(_gpio_rx, &rxInterruptHandler, CHANGE);
     
     Serial.printf("InitI2S\n");
     InitI2S();
-    //Serial.printf("StartI2S\n");
-    //StartI2S();
     Serial.printf("Done\n");
 }
 
@@ -376,77 +376,61 @@ void ESP8266Can::StopI2S()
 	CLEAR_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_START);
 }
 
+void ESP8266Can::PrepareQueue(const char *name, struct slc_queue_item *queue, uint32_t queueLength, void *buffer, uint32_t bufferLength, uint32_t eof)
+{
+    int blockSize = bufferLength / queueLength;
+        
+    /* prepare linked DMA descriptors, having EOF set for all */
+    for(int num = 0; num < queueLength; num++)
+    {
+        int nextNum = (num + 1) % queueLength;
+        
+        queue[num].owner = 1;
+        queue[num].eof = eof;
+        queue[num].sub_sof = 0;
+        queue[num].datalen = blockSize;
+        queue[num].blocksize = blockSize;
+        queue[num].buf_ptr = (uint32_t)buffer + num * blockSize;
+        queue[num].unused = 0;
+        queue[num].next_link_ptr = (uint32_t)&queue[nextNum];
+        
+        Serial.printf("%s[%d] (0x%08X) with %d bytes, buf_ptr (0x%08X), next %d (0x%08X)\n", name, num, &queue[num], queue[num].datalen, queue[num].buf_ptr, nextNum, queue[num].next_link_ptr);
+    }
+}
+
 void ESP8266Can::InitI2S(void) 
 {   
-    memset(I2SBufferTxData, 0xFF, sizeof(I2SBufferTxData));
-    memset(I2SBufferRxData, 0xFF, sizeof(I2SBufferRxData));
+    /* fill with dummy data */
+    memset((void *)I2SBufferRxData, 0xDE, sizeof(I2SBufferRxData));
+    memset((void *)I2SBufferTxData, 0xAD, sizeof(I2SBufferTxData));
 
-    /* prepare linked DMA descriptors, having EOF set for all */
-    for(int num = 0; num < COUNT(I2SBufferRx); num++)
-    {
-        int nextNum = (num + 1) % COUNT(I2SBufferRx);
-        int blockSize = sizeof(I2SBufferRxData) / COUNT(I2SBufferRx);
-        
-        I2SBufferRx[num].owner = 1;
-        I2SBufferRx[num].eof = 1;
-        I2SBufferRx[num].sub_sof = 0;
-        I2SBufferRx[num].datalen = blockSize;
-        I2SBufferRx[num].blocksize = blockSize;
-        I2SBufferRx[num].buf_ptr = (uint32_t)I2SBufferRxData + num * blockSize;
-        I2SBufferRx[num].unused = 0;
-        I2SBufferRx[num].next_link_ptr = (uint32_t)&I2SBufferRx[nextNum];
-        
-        Serial.printf("I2SBufferRx[%d] (0x%08X) with %d bytes, next %d (0x%08X)\n", num, &I2SBufferRx[num], I2SBufferRx[num].datalen, nextNum, I2SBufferRx[num].next_link_ptr);
-    }
+    /* prepare linked DMA descriptors, having EOF set for all RX slots */
+    PrepareQueue("I2SQueueRx", I2SQueueRx, COUNT(I2SQueueRx), (void *)I2SBufferRxData, sizeof(I2SBufferRxData), 1);
+    PrepareQueue("I2SQueueTx", I2SQueueTx, COUNT(I2SQueueTx), (void *)I2SBufferTxData, sizeof(I2SBufferTxData), 0);
     
-    /* this zero-buffer block implements the latch/reset signal */
-    for(int num = 0; num < COUNT(I2SBufferTx); num++)
-    {
-        int nextNum = (num + 1) % COUNT(I2SBufferTx);
-        int blockSize = sizeof(I2SBufferTxData) / COUNT(I2SBufferTx);
-        
-        I2SBufferTx[num].owner = 1;
-        I2SBufferTx[num].eof = 0;
-        I2SBufferTx[num].sub_sof = 0;
-        I2SBufferTx[num].datalen = blockSize;
-        I2SBufferTx[num].blocksize = blockSize;
-        I2SBufferTx[num].buf_ptr = (uint32_t)I2SBufferTxData + num * blockSize;
-        I2SBufferTx[num].unused = 0;
-        I2SBufferTx[num].next_link_ptr = (uint32_t)&I2SBufferTx[nextNum];
-        
-        Serial.printf("I2SBufferTx[%d] (0x%08X) with %d bytes, next %d (0x%08X)\n", num, &I2SBufferTx[num], I2SBufferTx[num].datalen, nextNum, I2SBufferTx[num].next_link_ptr);
-    }
 
-    /* configure RDX0/GPIO3 for output. it is the only supported pin unfortunately. */
+    /* configure IO pins */
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDI_U, FUNC_I2SI_DATA);
-    PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0RXD_U, FUNC_I2SO_DATA);
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTMS_U, FUNC_I2SI_WS);
-    
-    
+	PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0RXD_U, FUNC_I2SO_DATA);
+	PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_I2SO_WS);
+	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_I2SO_BCK);
+
+    /* reset DMA */
 	SET_PERI_REG_MASK(SLC_CONF0, SLC_TX_LOOP_TEST|SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
-	CLEAR_PERI_REG_MASK(SLC_CONF0, SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
+    CLEAR_PERI_REG_MASK(SLC_CONF0, SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
   
 	/* Enable and configure DMA */
-    //CLEAR_PERI_REG_MASK(SLC_CONF0, (SLC_MODE<<SLC_MODE_S));
-    //SET_PERI_REG_MASK(SLC_CONF0, (1<<SLC_MODE_S));
-    //SET_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_INFOR_NO_REPLACE|SLC_RX_EOF_MODE|SLC_TOKEN_NO_REPLACE);
-    //CLEAR_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_RX_FILL_EN|SLC_RX_FILL_MODE);
-    
-    /* clear all interrupt flags */
-
-    /* set up DMA */
     CLEAR_PERI_REG_MASK(SLC_CONF0, (SLC_MODE<<SLC_MODE_S));
     SET_PERI_REG_MASK(SLC_CONF0, (1<<SLC_MODE_S));
-    SET_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_INFOR_NO_REPLACE|SLC_TOKEN_NO_REPLACE);
-    //CLEAR_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_RX_FILL_EN|SLC_RX_EOF_MODE|SLC_RX_FILL_MODE);
-
     
-    Serial.printf("SLC_RX_LINK\n");
-    /* configure the first descriptor. TX_LINK isnt used, but has to be configured */
+	SET_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_INFOR_NO_REPLACE|SLC_TOKEN_NO_REPLACE); //Do this according to 8p-esp8266_i2s_module ... page 6/9  I can't see any impact.
+
+    /* configure the first descriptors */
     CLEAR_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_DESCADDR_MASK);
     CLEAR_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_DESCADDR_MASK);
-    SET_PERI_REG_MASK(SLC_RX_LINK, ((uint32)I2SBufferRx) & SLC_RXLINK_DESCADDR_MASK);
-    SET_PERI_REG_MASK(SLC_TX_LINK, ((uint32)I2SBufferTx) & SLC_TXLINK_DESCADDR_MASK);
+    SET_PERI_REG_MASK(SLC_RX_LINK, ((uint32)I2SQueueRx) & SLC_RXLINK_DESCADDR_MASK);
+    SET_PERI_REG_MASK(SLC_TX_LINK, ((uint32)I2SQueueTx) & SLC_TXLINK_DESCADDR_MASK);
 
     /* set up interrupt */
     ETS_SLC_INTR_DISABLE();
@@ -455,6 +439,8 @@ void ESP8266Can::InitI2S(void)
     ETS_SLC_INTR_ATTACH((int_handler_t)i2sInterrupt, (void *)this);
     ETS_SLC_INTR_ENABLE();
     
+    /* set up DMA done, start */
+    StartI2S();
     
     /* configure I2S subsystem */
     I2S_CLK_ENABLE();
@@ -463,15 +449,15 @@ void ESP8266Can::InitI2S(void)
     CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RESET_MASK);
 
     /* Select 16bits per channel (FIFO_MOD=0), no DMA access (FIFO only) */
-
-	CLEAR_PERI_REG_MASK(I2S_FIFO_CONF, I2S_I2S_DSCR_EN|(I2S_I2S_RX_FIFO_MOD<<I2S_I2S_RX_FIFO_MOD_S)|
+	CLEAR_PERI_REG_MASK(I2S_FIFO_CONF, I2S_I2S_DSCR_EN|
+            (I2S_I2S_RX_FIFO_MOD<<I2S_I2S_RX_FIFO_MOD_S)|
 			(I2S_I2S_TX_FIFO_MOD<<I2S_I2S_TX_FIFO_MOD_S)|
 			(I2S_I2S_TX_DATA_NUM<<I2S_I2S_TX_DATA_NUM_S)|
 			(I2S_I2S_RX_DATA_NUM<<I2S_I2S_RX_DATA_NUM_S) );
 
     /* Enable DMA in I2S subsystem */
     SET_PERI_REG_MASK(I2S_FIFO_CONF, I2S_I2S_DSCR_EN);
-	WRITE_PERI_REG(I2SRXEOF_NUM, sizeof(I2SBufferRxData) / COUNT(I2SBufferRx));
+	WRITE_PERI_REG(I2SRXEOF_NUM, sizeof(I2SBufferRxData) / COUNT(I2SQueueRx));
 
 	//Playing with these shows no impact unless specifically selected to be wrong.  (no effect)
 	CLEAR_PERI_REG_MASK(I2SCONF_CHAN, (I2S_TX_CHAN_MOD<<I2S_TX_CHAN_MOD_S)|(I2S_RX_CHAN_MOD<<I2S_RX_CHAN_MOD_S));
@@ -480,29 +466,23 @@ void ESP8266Can::InitI2S(void)
 	SET_PERI_REG_MASK(I2SINT_CLR, I2S_I2S_TX_REMPTY_INT_CLR|I2S_I2S_TX_WFULL_INT_CLR|I2S_I2S_RX_WFULL_INT_CLR|I2S_I2S_PUT_DATA_INT_CLR|I2S_I2S_TAKE_DATA_INT_CLR);
 	CLEAR_PERI_REG_MASK(I2SINT_CLR, I2S_I2S_TX_REMPTY_INT_CLR|I2S_I2S_TX_WFULL_INT_CLR|I2S_I2S_RX_WFULL_INT_CLR|I2S_I2S_PUT_DATA_INT_CLR|I2S_I2S_TAKE_DATA_INT_CLR);
 
-    Serial.printf("I2SCONF\n");
     uint32_t bestClkmDiv = 4;
-    uint32_t bestBckDiv = 17;
+    uint32_t bestBckDiv = 15;
     
     /* configure the rates */
-    CLEAR_PERI_REG_MASK(I2SCONF, I2S_TRANS_SLAVE_MOD|
+    CLEAR_PERI_REG_MASK(I2SCONF, I2S_TRANS_SLAVE_MOD|I2S_RECE_SLAVE_MOD|
                         (I2S_BITS_MOD<<I2S_BITS_MOD_S)|
                         (I2S_BCK_DIV_NUM <<I2S_BCK_DIV_NUM_S)|
                         (I2S_CLKM_DIV_NUM<<I2S_CLKM_DIV_NUM_S));
-    SET_PERI_REG_MASK(I2SCONF, I2S_RIGHT_FIRST|I2S_MSB_RIGHT|I2S_RECE_SLAVE_MOD|
-                        I2S_RECE_MSB_SHIFT|I2S_TRANS_MSB_SHIFT|
+    SET_PERI_REG_MASK(I2SCONF, I2S_RIGHT_FIRST|I2S_MSB_RIGHT|I2S_RECE_MSB_SHIFT|I2S_TRANS_MSB_SHIFT|
                         (((bestBckDiv-1)&I2S_BCK_DIV_NUM )<<I2S_BCK_DIV_NUM_S)|
                         (((bestClkmDiv-1)&I2S_CLKM_DIV_NUM)<<I2S_CLKM_DIV_NUM_S));
                         
-	//enable int
-	SET_PERI_REG_MASK(I2SINT_ENA, I2S_I2S_TX_REMPTY_INT_ENA|I2S_I2S_TX_WFULL_INT_ENA|I2S_I2S_RX_REMPTY_INT_ENA|I2S_I2S_TX_PUT_DATA_INT_ENA|I2S_I2S_RX_TAKE_DATA_INT_ENA);  //I don't believe these are needed.
-
-    /* set up DMA done, start */
-    StartI2S();
+	/* enable interrupts */
+	SET_PERI_REG_MASK(I2SINT_ENA, I2S_I2S_TX_REMPTY_INT_ENA|I2S_I2S_TX_WFULL_INT_ENA|I2S_I2S_RX_REMPTY_INT_ENA|I2S_I2S_TX_PUT_DATA_INT_ENA|I2S_I2S_RX_TAKE_DATA_INT_ENA);
     
-	//Start transmission
-	SET_PERI_REG_MASK(I2SCONF,I2S_I2S_TX_START|I2S_I2S_RX_START);
-    Serial.printf("done\n");
+	/* start transmission for RX and TX */
+	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_TX_START|I2S_I2S_RX_START);
 }
 
 
