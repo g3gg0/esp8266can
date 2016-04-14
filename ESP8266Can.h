@@ -51,12 +51,23 @@ public:
 
 private:
     /* n queue items share the whole buffer */
-    struct slc_queue_item I2SQueueRx[1];
-    struct slc_queue_item I2SQueueTx[1];
-    uint32_t I2SBufferTxData[512/4];
-    uint32_t I2SBufferRxData[1024/4];
+    struct slc_queue_item I2SQueueRx[8];
+    struct slc_queue_item I2SQueueTx[8];
+    uint8_t I2SBufferTxData[8192];
+    uint8_t I2SBufferRxData[8192];
+    
+    /*
+        CLK_I2S = 160MHz  / I2S_CLKM_DIV_NUM
+        BCLK    = CLK_I2S / I2S_BCK_DIV_NUM
+        WS      = BCLK/2  / (16 + I2S_BITS_MOD)
+        I2S_CLKM_DIV_NUM - 5-127  must be >5 for I2S data
+        I2S_BCK_DIV_NUM - 2-127
+    */
+    uint32_t bestClkmDiv = 8;
+    uint32_t bestBckDiv = 4;
     
     uint32_t _rate; 
+    uint32_t _oversampling; 
     uint8_t _gpio_tx;
     uint8_t _gpio_rx;
     uint32_t _maxTries;

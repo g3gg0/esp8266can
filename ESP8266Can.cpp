@@ -24,22 +24,34 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #include <eagle_soc.h>
 
 #define LEADING_BITS            (5U)
+#define BASEFREQ                (160000000L)
 
 #define INT_RX_BUFFERS 8
-#define INT_RX_BUFFER_SIZE (1+11+3+4+64+15+1+2 + 10)
+#define INT_RX_BUFFER_SIZE (1+11+3+4+64+15+1+2 + 10 + 500)
 
 #define COUNT(x) (sizeof(x) / sizeof((x)[0]))
 
-static uint8_t int_gpio_rx = 0;
-static uint32_t int_bit_time = 0;
-static uint32_t int_idle_time = 0;
-static uint32_t int_receive_buf[INT_RX_BUFFERS][INT_RX_BUFFER_SIZE];
-static uint8_t int_buffer_num_read = 0;
-static uint8_t int_buffer_num = 0;
-static uint8_t int_buffer_pos = 0;
+#define CLEAR_SET_REG_POS(reg,pos,mask,set) \
+    do { \
+        CLEAR_PERI_REG_MASK(reg,(mask)<<(pos)); \
+        SET_PERI_REG_MASK(reg, (((uint32_t)(set))&(mask))<<(pos)); \
+    } while(0)
+        
 
-static volatile uint32_t int_count = 0;
-static volatile uint32_t int_bits_set = 0;
+static volatile uint8_t int_gpio_rx = 0;
+static volatile uint32_t int_bit_time = 0;
+static volatile uint32_t int_idle_time = 0;
+static volatile uint32_t int_receive_buf[INT_RX_BUFFERS][INT_RX_BUFFER_SIZE];
+static volatile uint8_t int_buffer_num_read = 0;
+static volatile uint8_t int_buffer_num = 0;
+static volatile uint8_t int_buffer_pos = 0;
+
+static volatile uint32_t int_rx_eof_count = 0;
+static volatile uint32_t int_tx_eof_count = 0;
+static volatile uint32_t int_bits_changed = 0;
+
+static volatile uint32_t int_buf_filled = 0;
+static volatile uint8_t int_buf[128];
 
 
 
@@ -50,6 +62,7 @@ extern "C"
     #include "eagle_soc.h"
     #include "esp8266_peri.h"
     #include "slc_register.h"
+    
     extern void rom_i2c_writeReg_Mask(uint32_t block, uint32_t host_id, uint32_t reg_add, uint32_t Msb, uint32_t Lsb, uint32_t indata);
 
     static inline uint32_t _getCycleCountRaw()
@@ -88,14 +101,17 @@ extern "C"
         
         /* make sure the line is recessive for n consecutive bits */
         cyclesStart += (30 * cyclesBit);
+        
         while (_getCycleCount() < cyclesStart)
         {
+        #if 0
             if(!(GPIO_REG_READ(GPIO_IN_ADDRESS) & pinRegisterRx))
             {
                 /* return busy */
                 xt_wsr_ps(_state);
                 return ERR_BUSY_LINE;
             }
+        #endif
         }
 
         /* first bit always dominant */
@@ -121,7 +137,6 @@ extern "C"
                 }
                 
                 bool txRecessive = ((data & mask) != 0);
-                Serial.printf(txRecessive ? "1" : "0");
                 
                 /* no stuffing in ACK slot */
                 if(bitNum >= ackSlot - 1)
@@ -191,12 +206,10 @@ extern "C"
                 }
 
                 /* do so, read the RX line status */
-                //volatile uint32_t dummy = GPIO_REG_READ(GPIO_IN_ADDRESS);
                 bool rxRecessive = ((GPIO_REG_READ(GPIO_IN_ADDRESS) & pinRegisterRx) != 0);
-                Serial.printf(rxRecessive ? "1 " : "0 ");
                 
                 /* and check if the RX line is the same as the TX line */
-                if(0 && rxRecessive != txRecessive)
+                if(/* !!!!!!!!!!!!!!!!!!TEST!!!!!!!!!!!!!!!!!! */ 0 && rxRecessive != txRecessive)
                 {
                     if(rxRecessive)
                     {
@@ -237,65 +250,51 @@ extern "C"
         }
     }
     
-    void ICACHE_RAM_ATTR rxInterruptHandler()
+    static void ICACHE_RAM_ATTR parseBuffer(uint16_t *data, uint32_t length)
     {
-        static uint32_t lastTime = 0;
-        static bool lastChangeRecessive = true;
-        uint32_t lastChangeTime = _getCycleCountRaw();
+        static uint32_t bits = 0;
+        static uint32_t bitState = 0;
         
-        while(true)
+        for(uint32_t bytePos = 0; bytePos < length; bytePos++)
         {
-            bool rxRecessive = ((GPIO_REG_READ(GPIO_IN_ADDRESS) & int_gpio_rx) != 0);
-            
-            /* nothing changed... */
-            if(lastChangeRecessive == rxRecessive)
+            for(uint32_t bitPos = 0; bitPos < 16; bitPos++)
             {
-                /* no change for a few bit periods, return */
-                if((_getCycleCountRaw() - lastChangeTime) > 10 * int_idle_time)
-                {
-                    return;
-                }
-                continue;
-            }
-            
-            lastChangeRecessive = rxRecessive;
-            lastChangeTime = _getCycleCountRaw();
-            
-            uint32_t thisTime = _getCycleCountRaw();
-            uint32_t delta = (thisTime - lastTime);
-            
-            /* a new message appears */
-            if(int_buffer_pos > 0 && delta > int_idle_time)
-            {
-                /* make sure we start with a dominant bit */
-                if(rxRecessive)
-                {
-                    return;
-                }
+                uint32_t thisBit = (data[bytePos ^ 1] & (1<<(15 - bitPos))) != 0;
                 
-                int_receive_buf[int_buffer_num][int_buffer_pos] = 0xFFFFFFFF;
-                int_buffer_num++;
-                int_buffer_pos = 0;
-                
-                /* all buffers full, start over */
-                if(int_buffer_num >= INT_RX_BUFFERS)
+                if(thisBit != bitState)
+                { 
+                    int_bits_changed++;
+                    
+                    /* append (oversampled) bit count or terminate buffer */
+                    if(int_buffer_pos < INT_RX_BUFFER_SIZE - 2)
+                    {
+                        int_receive_buf[int_buffer_num][int_buffer_pos] = bits;
+                        int_buffer_pos++;
+                    }
+                    else
+                    {
+                        int_receive_buf[int_buffer_num][int_buffer_pos] = 0xFFFFFFFF;
+                    }
+                    
+                    bits = 1;
+                    bitState = thisBit;
+                }
+                else
                 {
-                    int_buffer_num = 0;
-                    int_buffer_pos = 0;
+                    bits++;
+                    
+                    /* message ends, too many bits with same level */
+                    if((int_buffer_pos > 0) && (bits > 10 * 20))
+                    {
+                        int_receive_buf[int_buffer_num][int_buffer_pos] = 0xFFFFFFFF;
+                        int_buffer_num = ((int_buffer_num + 1) % INT_RX_BUFFERS);
+                        int_buffer_pos = 0;
+                    }
                 }
             }
-            else if(int_buffer_pos < INT_RX_BUFFER_SIZE - 1)
-            {
-                uint32_t bitCount = (delta + int_bit_time / 10) / int_bit_time;
-                
-                int_receive_buf[int_buffer_num][int_buffer_pos] = bitCount;
-                int_buffer_pos++;
-            }
-            
-            lastTime = thisTime;
         }
     }
-
+    
     static void ICACHE_RAM_ATTR i2sInterrupt(ESP8266Can *can) 
     {
         uint32_t slc_intr_status = READ_PERI_REG(SLC_INT_STATUS);
@@ -303,37 +302,42 @@ extern "C"
         
         if(!slc_intr_status)
         {
-            Serial.printf("int %d, zero status: 0x%08X\n", int_count, slc_intr_status); 
+            Serial.printf("zero status\n"); 
             return;            
         }
 
         if((slc_intr_status & SLC_RX_EOF_INT_ST))
         {
+            slc_intr_status &= ~SLC_RX_EOF_INT_ST;
+            
             struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_RX_EOF_DES_ADDR);
-            
-            /* queue item filled and something in buffer changed. YAY! */
-            if(((uint8_t *)completed->buf_ptr)[0] != 0xDE)
-            {
-                /* reset, should be overwritten later again */
-                ((uint8_t *)completed->buf_ptr)[0] = 0xDE;
-                int_bits_set++;
-            }
-            
-            int_count++;
+            completed->owner = 1;
+            int_rx_eof_count++;
             
             //Serial.printf("int %d, completed: 0x%08X\n", int_count, completed);        
-            slc_intr_status &= ~SLC_RX_EOF_INT_ST;
         }
         
         if((slc_intr_status & SLC_TX_EOF_INT_ST))
         {
-            //Serial.printf("int %d, completed: 0x%08X\n", int_count, completed);        
             slc_intr_status &= ~SLC_TX_EOF_INT_ST;
+            
+            struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_TX_EOF_DES_ADDR);
+            completed->owner = 1;
+            
+            parseBuffer((uint16_t *)completed->buf_ptr, completed->datalen / 2);
+            
+            if(!int_buf_filled)
+            {
+                memcpy((void*)int_buf, (void*)completed->buf_ptr, sizeof(int_buf));
+                int_buf_filled = 1;
+            }
+            
+            int_tx_eof_count++;
         }
         
         if(slc_intr_status)
         {
-            Serial.printf("int %d, unknown status: 0x%08X\n", int_count, slc_intr_status);        
+            Serial.printf("unknown status: 0x%08X\n", slc_intr_status);        
         }
     }
 }
@@ -360,20 +364,35 @@ void ESP8266Can::StartRx()
     int_idle_time = 10 * int_bit_time;
     
     Serial.printf("InitI2S\n");
+    _oversampling = (BASEFREQ / bestClkmDiv / bestBckDiv) / _rate;
+    Serial.printf(" Rate:         %d\n", _rate);
+    Serial.printf(" MDIV:         %d\n", bestClkmDiv);
+    Serial.printf(" BCK:          %d\n", bestBckDiv);
+    Serial.printf(" -> Oversampling: %d\n", _oversampling);
+    
     InitI2S();
+    StartI2S();
     Serial.printf("Done\n");
 }
 
 void ESP8266Can::StartI2S()
 {
-	SET_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
+	/* start transmission for RX and TX */
 	SET_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_START);
+	SET_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
+    
+	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
+	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_TX_START);
 }
 
 void ESP8266Can::StopI2S()
 {
-	CLEAR_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
+	/* stop transmission for RX and TX */
+	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
+	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_TX_START);
+    
 	CLEAR_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_START);
+	CLEAR_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
 }
 
 void ESP8266Can::PrepareQueue(const char *name, struct slc_queue_item *queue, uint32_t queueLength, void *buffer, uint32_t bufferLength, uint32_t eof)
@@ -399,48 +418,31 @@ void ESP8266Can::PrepareQueue(const char *name, struct slc_queue_item *queue, ui
 }
 
 void ESP8266Can::InitI2S(void) 
-{   
+{
+    /* ----------------- setup buffers ----------------- */
+    
     /* fill with dummy data */
     memset((void *)I2SBufferRxData, 0xDE, sizeof(I2SBufferRxData));
     memset((void *)I2SBufferTxData, 0xAD, sizeof(I2SBufferTxData));
 
     /* prepare linked DMA descriptors, having EOF set for all RX slots */
-    PrepareQueue("I2SQueueRx", I2SQueueRx, COUNT(I2SQueueRx), (void *)I2SBufferRxData, sizeof(I2SBufferRxData), 1);
-    PrepareQueue("I2SQueueTx", I2SQueueTx, COUNT(I2SQueueTx), (void *)I2SBufferTxData, sizeof(I2SBufferTxData), 0);
+    PrepareQueue("I2SQueueRx", I2SQueueRx, COUNT(I2SQueueRx), I2SBufferRxData, sizeof(I2SBufferRxData), 1);
+    PrepareQueue("I2SQueueTx", I2SQueueTx, COUNT(I2SQueueTx), I2SBufferTxData, sizeof(I2SBufferTxData), 1);
     
+    
+    /* ----------------- setup IO ----------------- */
 
     /* configure IO pins */
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDI_U, FUNC_I2SI_DATA);
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTMS_U, FUNC_I2SI_WS);
+	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTCK_U, FUNC_I2SI_BCK);
+    
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0RXD_U, FUNC_I2SO_DATA);
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_I2SO_WS);
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_I2SO_BCK);
-
-    /* reset DMA */
-	SET_PERI_REG_MASK(SLC_CONF0, SLC_TX_LOOP_TEST|SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
-    CLEAR_PERI_REG_MASK(SLC_CONF0, SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
-  
-	/* Enable and configure DMA */
-    CLEAR_PERI_REG_MASK(SLC_CONF0, (SLC_MODE<<SLC_MODE_S));
-    SET_PERI_REG_MASK(SLC_CONF0, (1<<SLC_MODE_S));
     
-	SET_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_INFOR_NO_REPLACE|SLC_TOKEN_NO_REPLACE); //Do this according to 8p-esp8266_i2s_module ... page 6/9  I can't see any impact.
-
-    /* configure the first descriptors */
-    CLEAR_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_DESCADDR_MASK);
-    CLEAR_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_DESCADDR_MASK);
-    SET_PERI_REG_MASK(SLC_RX_LINK, ((uint32)I2SQueueRx) & SLC_RXLINK_DESCADDR_MASK);
-    SET_PERI_REG_MASK(SLC_TX_LINK, ((uint32)I2SQueueTx) & SLC_TXLINK_DESCADDR_MASK);
-
-    /* set up interrupt */
-    ETS_SLC_INTR_DISABLE();
-    SET_PERI_REG_MASK(SLC_INT_CLR, 0xffffffff);
-    WRITE_PERI_REG(SLC_INT_ENA, SLC_INTEREST_EVENT);
-    ETS_SLC_INTR_ATTACH((int_handler_t)i2sInterrupt, (void *)this);
-    ETS_SLC_INTR_ENABLE();
     
-    /* set up DMA done, start */
-    StartI2S();
+    /* ----------------- setup I2S ----------------- */
     
     /* configure I2S subsystem */
     I2S_CLK_ENABLE();
@@ -448,67 +450,101 @@ void ESP8266Can::InitI2S(void)
     SET_PERI_REG_MASK(I2SCONF, I2S_I2S_RESET_MASK);
     CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RESET_MASK);
 
+    /* configure the operating mode */
+    CLEAR_PERI_REG_MASK(I2SCONF, I2S_RECE_SLAVE_MOD|I2S_TRANS_SLAVE_MOD);
+    SET_PERI_REG_MASK(I2SCONF, I2S_RIGHT_FIRST|I2S_MSB_RIGHT|I2S_RECE_MSB_SHIFT|I2S_TRANS_MSB_SHIFT);
+    
+    /* set speed and bit count (16 bit: 0 extra bits) */
+	CLEAR_SET_REG_POS(I2SCONF, I2S_BITS_MOD_S, I2S_BITS_MOD, 0);
+	CLEAR_SET_REG_POS(I2SCONF, I2S_BCK_DIV_NUM_S, I2S_BCK_DIV_NUM, (bestBckDiv)&I2S_BCK_DIV_NUM);
+	CLEAR_SET_REG_POS(I2SCONF, I2S_CLKM_DIV_NUM_S, I2S_CLKM_DIV_NUM, (bestClkmDiv)&I2S_CLKM_DIV_NUM);
+    
+    
     /* Select 16bits per channel (FIFO_MOD=0), no DMA access (FIFO only) */
-	CLEAR_PERI_REG_MASK(I2S_FIFO_CONF, I2S_I2S_DSCR_EN|
-            (I2S_I2S_RX_FIFO_MOD<<I2S_I2S_RX_FIFO_MOD_S)|
-			(I2S_I2S_TX_FIFO_MOD<<I2S_I2S_TX_FIFO_MOD_S)|
-			(I2S_I2S_TX_DATA_NUM<<I2S_I2S_TX_DATA_NUM_S)|
-			(I2S_I2S_RX_DATA_NUM<<I2S_I2S_RX_DATA_NUM_S) );
-
-    /* Enable DMA in I2S subsystem */
-    SET_PERI_REG_MASK(I2S_FIFO_CONF, I2S_I2S_DSCR_EN);
-	WRITE_PERI_REG(I2SRXEOF_NUM, sizeof(I2SBufferRxData) / COUNT(I2SQueueRx));
-
-	//Playing with these shows no impact unless specifically selected to be wrong.  (no effect)
-	CLEAR_PERI_REG_MASK(I2SCONF_CHAN, (I2S_TX_CHAN_MOD<<I2S_TX_CHAN_MOD_S)|(I2S_RX_CHAN_MOD<<I2S_RX_CHAN_MOD_S));
-	SET_PERI_REG_MASK(I2SCONF_CHAN, (0<<I2S_TX_CHAN_MOD_S)|(0<<I2S_RX_CHAN_MOD_S));
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_RX_FIFO_MOD_S, I2S_I2S_RX_FIFO_MOD, 0);
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_TX_FIFO_MOD_S, I2S_I2S_TX_FIFO_MOD, 0);
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_RX_DATA_NUM_S, I2S_I2S_RX_DATA_NUM, 0);
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_TX_DATA_NUM_S, I2S_I2S_TX_DATA_NUM, 0);
     
-	SET_PERI_REG_MASK(I2SINT_CLR, I2S_I2S_TX_REMPTY_INT_CLR|I2S_I2S_TX_WFULL_INT_CLR|I2S_I2S_RX_WFULL_INT_CLR|I2S_I2S_PUT_DATA_INT_CLR|I2S_I2S_TAKE_DATA_INT_CLR);
-	CLEAR_PERI_REG_MASK(I2SINT_CLR, I2S_I2S_TX_REMPTY_INT_CLR|I2S_I2S_TX_WFULL_INT_CLR|I2S_I2S_RX_WFULL_INT_CLR|I2S_I2S_PUT_DATA_INT_CLR|I2S_I2S_TAKE_DATA_INT_CLR);
+    /* Enable SLC DMA in I2S subsystem */
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, 0, I2S_I2S_DSCR_EN, I2S_I2S_DSCR_EN);
+    
+    /* set dual channel data (CHAN_MOD=0) */
+	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_RX_CHAN_MOD_S, I2S_RX_CHAN_MOD, 0);
+	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_TX_CHAN_MOD_S, I2S_TX_CHAN_MOD, 0);
+    
+    /* set maximum I2S FIFO size to be transferred at once (in units of 4 bytes) */
+	CLEAR_SET_REG_POS(I2SRXEOF_NUM, I2S_I2S_RX_EOF_NUM_S, I2S_I2S_RX_EOF_NUM, 128);
+    
+    
+    /* ----------------- setup SLC ----------------- */
 
-    uint32_t bestClkmDiv = 4;
-    uint32_t bestBckDiv = 15;
+    /* reset DMA */
+	SET_PERI_REG_MASK(SLC_CONF0, SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
+    CLEAR_PERI_REG_MASK(SLC_CONF0, SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
     
-    /* configure the rates */
-    CLEAR_PERI_REG_MASK(I2SCONF, I2S_TRANS_SLAVE_MOD|I2S_RECE_SLAVE_MOD|
-                        (I2S_BITS_MOD<<I2S_BITS_MOD_S)|
-                        (I2S_BCK_DIV_NUM <<I2S_BCK_DIV_NUM_S)|
-                        (I2S_CLKM_DIV_NUM<<I2S_CLKM_DIV_NUM_S));
-    SET_PERI_REG_MASK(I2SCONF, I2S_RIGHT_FIRST|I2S_MSB_RIGHT|I2S_RECE_MSB_SHIFT|I2S_TRANS_MSB_SHIFT|
-                        (((bestBckDiv-1)&I2S_BCK_DIV_NUM )<<I2S_BCK_DIV_NUM_S)|
-                        (((bestClkmDiv-1)&I2S_CLKM_DIV_NUM)<<I2S_CLKM_DIV_NUM_S));
-                        
-	/* enable interrupts */
-	SET_PERI_REG_MASK(I2SINT_ENA, I2S_I2S_TX_REMPTY_INT_ENA|I2S_I2S_TX_WFULL_INT_ENA|I2S_I2S_RX_REMPTY_INT_ENA|I2S_I2S_TX_PUT_DATA_INT_ENA|I2S_I2S_RX_TAKE_DATA_INT_ENA);
+	SET_PERI_REG_MASK(SLC_CONF0, SLC_TX_LOOP_TEST|SLC_RX_LOOP_TEST|SLC_RX_AUTO_WRBACK|SLC_RX_NO_RESTART_CLR|SLC_DATA_BURST_EN|SLC_DSCR_BURST_EN);
+  
+	/* Enable and configure DMA */
+	CLEAR_SET_REG_POS(SLC_CONF0, SLC_MODE_S, SLC_MODE, 1);
     
-	/* start transmission for RX and TX */
-	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_TX_START|I2S_I2S_RX_START);
+	SET_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_INFOR_NO_REPLACE|SLC_TOKEN_NO_REPLACE);
+
+    /* configure the first descriptors */
+	CLEAR_SET_REG_POS(SLC_RX_LINK, 0, SLC_RXLINK_DESCADDR_MASK, I2SQueueRx);
+	CLEAR_SET_REG_POS(SLC_TX_LINK, 0, SLC_TXLINK_DESCADDR_MASK, I2SQueueTx);
+
+    /* set up SLC interrupt */
+    ETS_SLC_INTR_DISABLE();
+    SET_PERI_REG_MASK(SLC_INT_CLR, 0xffffffff);
+    WRITE_PERI_REG(SLC_INT_ENA, SLC_INTEREST_EVENT);
+    ETS_SLC_INTR_ATTACH((int_handler_t)i2sInterrupt, (void *)this);
+    ETS_SLC_INTR_ENABLE();
 }
 
 
 void ESP8266Can::Loop()
 {
-    delay(250);
-    Serial.printf("Interrupts: %d, bits: %d\n", int_count, int_bits_set);
-    
+    /* dump CAN frames - to console for now */
     if(int_buffer_num_read != int_buffer_num)
     {
         int bitPos = 0;
-        bool bitLevel = true;
+        bool undoStuff = false;
+        bool bitLevel = false;
         
-        Serial.printf("Buffer %02d START ", int_buffer_num_read);
+        Serial.printf("Buffer %02d: ", int_buffer_num_read);
         
         for(int pos = 0; pos < INT_RX_BUFFER_SIZE; pos++)
         {
             uint32_t bits = int_receive_buf[int_buffer_num_read][pos];
             
-            if(bits > 10)
+            if(bits == 0xFFFFFFFF)
             {
                 break;
             }
             
-            bitLevel = !bitLevel;
+            /* first entry is crap */
+            if(pos < 1)
+            {
+                continue;
+            }
             
+            /* calculate the number of bits */
+            bits = (bits + (_oversampling / 2)) / _oversampling;
+            
+            /* must not happen - maximum is 5 bits then a stuff bit */
+            if(bits > 5)
+            {
+                Serial.printf(" (ERR) ");
+                bits = 0;
+            }
+            
+            /* is this a stuff bit? */
+            if(undoStuff)
+            {
+                undoStuff = false;
+                bits--;
+            }
         
             for(int bitNum = 0; bitNum < bits; bitNum++)
             {
@@ -527,9 +563,18 @@ void ESP8266Can::Loop()
                 Serial.printf(bitLevel ? "1" : "0");
                 bitPos++;
             }
+            
+            /* undo stuffing */
+            if(bits == 5)
+            {
+                undoStuff = true;
+            }
+            
+            bitLevel = !bitLevel;
         }
         Serial.printf("\n");
         
+        /* next buffer */
         int_buffer_num_read = (int_buffer_num_read + 1) % INT_RX_BUFFERS;
     }
 }
