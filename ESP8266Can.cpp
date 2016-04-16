@@ -231,7 +231,7 @@ extern "C"
     static void ICACHE_RAM_ATTR parseBuffer(ESP8266Can *can, uint16_t *data, uint32_t length)
     {
         static uint32_t bits = 0;
-        static uint32_t bitState = 0;
+        static uint32_t prevBit = 0;
         
         /* parse the received buffer, count all bits in it */
         for(uint32_t bytePos = 0; bytePos < length; bytePos++)
@@ -243,7 +243,7 @@ extern "C"
                 uint32_t thisBit = (data[bytePos ^ 1] & (1<<(15 - bitPos))) != 0;
                 
                 /* if the bit level changed, store how many bits were consecutive high or low */
-                if(thisBit != bitState)
+                if(thisBit != prevBit)
                 {
                     /* append (oversampled) bit count or terminate buffer */
                     if(can->ReceiveBuffersWriteEntry < INT_RX_BUFFER_SIZE - 2)
@@ -259,7 +259,7 @@ extern "C"
                     
                     /* there was a level change, so its the first bit of this level now */
                     bits = 1;
-                    bitState = thisBit;
+                    prevBit = thisBit;
                 }
                 else
                 {
@@ -295,12 +295,12 @@ extern "C"
         {
             /* reset flag */
             slc_intr_status &= ~SLC_RX_EOF_INT_ST;
+            can->InterruptRxCount++;     
             
             /* prepare item for requeue */
             struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_RX_EOF_DES_ADDR);
             completed->owner = 1;
             
-            can->InterruptRxCount++;     
         }
         
         /* the Tx interrupt handled, which is the data we RECEIVE. weird, ya. */
@@ -308,15 +308,16 @@ extern "C"
         {
             /* reset flag */
             slc_intr_status &= ~SLC_TX_EOF_INT_ST;
-            
-            /* prepare item for requeue */
-            struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_TX_EOF_DES_ADDR);
-            completed->owner = 1;
-            
             can->InterruptTxCount++;
+            
+            /* fetch filled buffer */
+            struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_TX_EOF_DES_ADDR);
             
             /* go through all bits and count them, passing information to main loop context */
             parseBuffer(can, (uint16_t *)completed->buf_ptr, completed->datalen / 2);
+            
+            /* prepare item for requeue */
+            completed->owner = 1;
         }
         
         if(slc_intr_status)
