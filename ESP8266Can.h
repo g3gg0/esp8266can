@@ -7,8 +7,8 @@
 /* per CANopen spec it's 87.5% at 500kbps some websites say :) */
 #define BIT_SAMPLING_POINT (15.0f)
 
-#define INT_RX_BUFFERS     (64)
-#define INT_RX_BUFFER_SIZE (128) /* worst case: 1+11+3+4+64+15+1+2+10 */
+#define INT_RX_BUFFERS     (800)
+#define INT_RX_BUFFER_SIZE (14) /* worst case: 1+11+3+4+64+15+1+2+10 bits */
 
 /* error/status codes for SendMessage and internal functions */
 typedef enum
@@ -42,7 +42,7 @@ public:
     void StopI2S();
     void InitI2S();
     void StartRx();
-    void Loop();
+    void Loop(void (*cbr)(uint8_t *frame));
     ~ESP8266Can();
     can_error_t SendMessage(uint16_t id, uint8_t length, uint8_t *data, bool req_remote = false, bool self_ack = true);
     void BuildCanFrame(uint8_t *buffer, uint16_t id, uint8_t length, uint8_t *data);
@@ -70,9 +70,9 @@ public:
 private:
     /* n queue items share the whole buffer */
     struct slc_queue_item I2SQueueRx[1];
-    struct slc_queue_item I2SQueueTx[3];
+    struct slc_queue_item I2SQueueTx[6];
     uint8_t I2SBufferRxData[128];
-    uint8_t I2SBufferTxData[2048 * 3];
+    uint8_t I2SBufferTxData[1024 * 6];
     
     /*
         CLK_I2S = 160MHz  / I2S_CLKM_DIV_NUM
