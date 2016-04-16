@@ -7,6 +7,9 @@
 /* per CANopen spec it's 87.5% at 500kbps some websites say :) */
 #define BIT_SAMPLING_POINT (15.0f)
 
+#define INT_RX_BUFFERS     (8)
+#define INT_RX_BUFFER_SIZE (1+11+3+4+64+15+1+2 + 10 + /* backup */25)
+
 /* error/status codes for SendMessage and internal functions */
 typedef enum
 {
@@ -34,7 +37,7 @@ struct slc_queue_item
 class ESP8266Can
 {
 public:
-    ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx);
+    ESP8266Can(uint32_t rate, uint8_t gpio_tx);
     void StartI2S();
     void StopI2S();
     void InitI2S();
@@ -43,18 +46,44 @@ public:
     ~ESP8266Can();
     can_error_t SendMessage(uint16_t id, uint8_t length, uint8_t *data, bool req_remote = false, bool self_ack = true);
     void BuildCanFrame(uint8_t *buffer, uint16_t id, uint8_t length, uint8_t *data);
+    uint32_t DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *length, uint8_t *data, bool *req_remote, bool *ack, bool errors);
     
     uint32_t cyclesBit() { return (uint32_t)(F_CPU / _rate); }
     uint32_t cyclesSample() { return (uint32_t)(cyclesBit() * BIT_SAMPLING_POINT / 100.0f); }
     
-    uint32_t IntCount = 0;
+    
+    
+    uint32_t InterruptReceiveBuffers[INT_RX_BUFFERS][INT_RX_BUFFER_SIZE];
+    uint8_t ReceiveBuffersReadNum = 0;
+    uint8_t ReceiveBuffersWriteNum = 0;
+    uint8_t ReceiveBuffersWriteEntry = 0;
+    uint32_t InterruptRxCount = 0;
+    uint32_t InterruptTxCount = 0;
+    
+    /* error counters Rx path */
+    uint32_t RxSuccess = 0;
+    uint32_t RxErrStuffBits = 0;
+    uint32_t RxErrCrc = 0;
+    uint32_t RxErrFormat = 0;
+    uint32_t RxErrAck = 0;
+    
+    /* error counters Tx path */
+    uint32_t TxSuccess = 0;
+    uint32_t TxErrLineBusy = 0;
+    uint32_t TxErrTransceiver = 0;
+    uint32_t TxErrNoAck = 0;
+    uint32_t TxErrArbitration = 0;
+    uint32_t TxErrCollision = 0;
+    
+    uint32_t _oversampling; 
+    
 
 private:
     /* n queue items share the whole buffer */
-    struct slc_queue_item I2SQueueRx[8];
-    struct slc_queue_item I2SQueueTx[8];
-    uint8_t I2SBufferTxData[8192];
-    uint8_t I2SBufferRxData[8192];
+    struct slc_queue_item I2SQueueRx[2];
+    struct slc_queue_item I2SQueueTx[4];
+    uint8_t I2SBufferRxData[2048];
+    uint8_t I2SBufferTxData[2048 * 4];
     
     /*
         CLK_I2S = 160MHz  / I2S_CLKM_DIV_NUM
@@ -66,8 +95,8 @@ private:
     uint32_t bestClkmDiv = 8;
     uint32_t bestBckDiv = 4;
     
+    bool _debug = false; 
     uint32_t _rate; 
-    uint32_t _oversampling; 
     uint8_t _gpio_tx;
     uint8_t _gpio_rx;
     uint32_t _maxTries;
