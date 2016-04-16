@@ -254,6 +254,7 @@ extern "C"
                     else
                     {
                         /* just terminate, buffer is already full */
+                        can->RxQueueOverflows++;
                         *buf = 0xFFFFFFFF;
                     }
                     

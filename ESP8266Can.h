@@ -66,6 +66,7 @@ public:
     uint32_t RxErrCrc = 0;
     uint32_t RxErrFormat = 0;
     uint32_t RxErrAck = 0;
+    uint32_t RxQueueOverflows = 0;
     
     /* error counters Tx path */
     uint32_t TxSuccess = 0;
