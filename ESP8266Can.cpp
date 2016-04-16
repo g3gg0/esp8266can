@@ -34,6 +34,16 @@ Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
         SET_PERI_REG_MASK(reg, (((uint32_t)(set))&(mask))<<(pos)); \
     } while(0)
         
+    
+/* intentionally keeping them as global variable because having them in class makes the code slower. 
+   Defining as class members has no benefit as we can only be instanciated once anyway. */
+static uint32_t InterruptReceiveBuffers[INT_RX_BUFFERS][INT_RX_BUFFER_SIZE];
+static uint8_t ReceiveBuffersReadNum = 0;
+static uint8_t ReceiveBuffersWriteNum = 0;
+static uint8_t ReceiveBuffersWriteEntry = 0;
+static uint32_t InterruptRxCount = 0;
+static uint32_t InterruptTxCount = 0;
+static uint32_t RxOversampling; 
 
 extern "C"
 {    
@@ -239,17 +249,17 @@ extern "C"
             for(uint32_t bitPos = 0; bitPos < 16; bitPos++)
             {
                 /* where to store the bit count */
-                uint32_t *buf = &can->InterruptReceiveBuffers[can->ReceiveBuffersWriteNum][can->ReceiveBuffersWriteEntry];
+                uint32_t *buf = &InterruptReceiveBuffers[ReceiveBuffersWriteNum][ReceiveBuffersWriteEntry];
                 uint32_t thisBit = (data[bytePos ^ 1] & (1<<(15 - bitPos))) != 0;
                 
                 /* if the bit level changed, store how many bits were consecutive high or low */
                 if(thisBit != prevBit)
                 {
                     /* append (oversampled) bit count or terminate buffer */
-                    if(can->ReceiveBuffersWriteEntry < INT_RX_BUFFER_SIZE - 2)
+                    if(ReceiveBuffersWriteEntry < INT_RX_BUFFER_SIZE - 2)
                     {
                         *buf = bits;
-                        can->ReceiveBuffersWriteEntry++;
+                        ReceiveBuffersWriteEntry++;
                     }
                     else
                     {
@@ -268,11 +278,11 @@ extern "C"
                     bits++;
                     
                     /* message ends, too many bits with same level */
-                    if((can->ReceiveBuffersWriteEntry > 0) && (bits > 8 * can->RxOversampling))
+                    if((ReceiveBuffersWriteEntry > 0) && (bits > 8 * RxOversampling))
                     {
                         *buf = 0xFFFFFFFF;
-                        can->ReceiveBuffersWriteNum = ((can->ReceiveBuffersWriteNum + 1) % INT_RX_BUFFERS);
-                        can->ReceiveBuffersWriteEntry = 0;
+                        ReceiveBuffersWriteNum = ((ReceiveBuffersWriteNum + 1) % INT_RX_BUFFERS);
+                        ReceiveBuffersWriteEntry = 0;
                     }
                 }
             }
@@ -296,7 +306,7 @@ extern "C"
         {
             /* reset flag */
             slc_intr_status &= ~SLC_RX_EOF_INT_ST;
-            can->InterruptRxCount++;     
+            InterruptRxCount++;     
             
             /* prepare item for requeue */
             struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_RX_EOF_DES_ADDR);
@@ -309,7 +319,7 @@ extern "C"
         {
             /* reset flag */
             slc_intr_status &= ~SLC_TX_EOF_INT_ST;
-            can->InterruptTxCount++;
+            InterruptTxCount++;
             
             /* fetch filled buffer */
             struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_TX_EOF_DES_ADDR);

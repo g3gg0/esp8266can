@@ -53,12 +53,6 @@ public:
     
     
     
-    uint32_t InterruptReceiveBuffers[INT_RX_BUFFERS][INT_RX_BUFFER_SIZE];
-    uint8_t ReceiveBuffersReadNum = 0;
-    uint8_t ReceiveBuffersWriteNum = 0;
-    uint8_t ReceiveBuffersWriteEntry = 0;
-    uint32_t InterruptRxCount = 0;
-    uint32_t InterruptTxCount = 0;
     
     /* error counters Rx path */
     uint32_t RxSuccess = 0;
@@ -76,7 +70,6 @@ public:
     uint32_t TxErrArbitration = 0;
     uint32_t TxErrCollision = 0;
     
-    uint32_t RxOversampling; 
     
 
 private:
