@@ -76,7 +76,7 @@ public:
     uint32_t TxErrArbitration = 0;
     uint32_t TxErrCollision = 0;
     
-    uint32_t _oversampling; 
+    uint32_t RxOversampling; 
     
 
 private:

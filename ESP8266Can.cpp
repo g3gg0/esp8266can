@@ -268,7 +268,7 @@ extern "C"
                     bits++;
                     
                     /* message ends, too many bits with same level */
-                    if((can->ReceiveBuffersWriteEntry > 0) && (bits > 8 * can->_oversampling))
+                    if((can->ReceiveBuffersWriteEntry > 0) && (bits > 8 * can->RxOversampling))
                     {
                         *buf = 0xFFFFFFFF;
                         can->ReceiveBuffersWriteNum = ((can->ReceiveBuffersWriteNum + 1) % INT_RX_BUFFERS);
@@ -346,11 +346,11 @@ ESP8266Can::~ESP8266Can()
 void ESP8266Can::StartRx()
 {
     Serial.printf("ESP8266Can::StartRx\n");
-    _oversampling = (BASEFREQ / bestClkmDiv / bestBckDiv) / _rate;
+    RxOversampling = (BASEFREQ / bestClkmDiv / bestBckDiv) / _rate;
     Serial.printf("   Rate:         %d\n", _rate);
     Serial.printf("   MDIV:         %d\n", bestClkmDiv);
     Serial.printf("   BCK:          %d\n", bestBckDiv);
-    Serial.printf("   Oversampling: %d\n", _oversampling);
+    Serial.printf("   Oversampling: %d\n", RxOversampling);
     
     InitI2S();
     StartI2S();
@@ -563,7 +563,7 @@ void ESP8266Can::Loop()
             }
             
             /* calculate the number of bits */
-            bits = (bits + (_oversampling / 2)) / _oversampling;
+            bits = (bits + (RxOversampling / 2)) / RxOversampling;
             
         
             for(uint32_t bitNum = 0; bitNum < bits; bitNum++)
