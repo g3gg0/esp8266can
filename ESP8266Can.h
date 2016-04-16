@@ -7,8 +7,8 @@
 /* per CANopen spec it's 87.5% at 500kbps some websites say :) */
 #define BIT_SAMPLING_POINT (15.0f)
 
-#define INT_RX_BUFFERS     (8)
-#define INT_RX_BUFFER_SIZE (1+11+3+4+64+15+1+2 + 10 + /* backup */25)
+#define INT_RX_BUFFERS     (64)
+#define INT_RX_BUFFER_SIZE (128) /* worst case: 1+11+3+4+64+15+1+2+10 */
 
 /* error/status codes for SendMessage and internal functions */
 typedef enum
@@ -51,9 +51,6 @@ public:
     uint32_t cyclesBit() { return (uint32_t)(F_CPU / _rate); }
     uint32_t cyclesSample() { return (uint32_t)(cyclesBit() * BIT_SAMPLING_POINT / 100.0f); }
     
-    
-    
-    
     /* error counters Rx path */
     uint32_t RxSuccess = 0;
     uint32_t RxErrStuffBits = 0;
@@ -70,14 +67,12 @@ public:
     uint32_t TxErrArbitration = 0;
     uint32_t TxErrCollision = 0;
     
-    
-
 private:
     /* n queue items share the whole buffer */
-    struct slc_queue_item I2SQueueRx[2];
-    struct slc_queue_item I2SQueueTx[4];
-    uint8_t I2SBufferRxData[2048];
-    uint8_t I2SBufferTxData[2048 * 4];
+    struct slc_queue_item I2SQueueRx[1];
+    struct slc_queue_item I2SQueueTx[3];
+    uint8_t I2SBufferRxData[128];
+    uint8_t I2SBufferTxData[2048 * 3];
     
     /*
         CLK_I2S = 160MHz  / I2S_CLKM_DIV_NUM
@@ -86,8 +81,8 @@ private:
         I2S_CLKM_DIV_NUM - 5-127  must be >5 for I2S data
         I2S_BCK_DIV_NUM - 2-127
     */
-    uint32_t bestClkmDiv = 8;
-    uint32_t bestBckDiv = 4;
+    uint32_t bestClkmDiv = 13;
+    uint32_t bestBckDiv = 8;
     
     bool _debug = false; 
     uint32_t _rate; 
