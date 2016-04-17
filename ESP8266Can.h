@@ -37,7 +37,7 @@ struct slc_queue_item
 class ESP8266Can
 {
 public:
-    ESP8266Can(uint32_t rate, uint8_t gpio_tx);
+    ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx);
     void StartI2S();
     void StopI2S();
     void InitI2S();
@@ -58,6 +58,7 @@ public:
     uint32_t RxErrFormat = 0;
     uint32_t RxErrAck = 0;
     uint32_t RxQueueOverflows = 0;
+    uint32_t RxErrors() { return RxErrStuffBits + RxErrCrc + RxErrFormat + RxErrAck; }
     
     /* error counters Tx path */
     uint32_t TxSuccess = 0;
@@ -66,6 +67,8 @@ public:
     uint32_t TxErrNoAck = 0;
     uint32_t TxErrArbitration = 0;
     uint32_t TxErrCollision = 0;
+    uint32_t TxErrors() { return TxErrLineBusy + TxErrTransceiver + TxErrNoAck + TxErrArbitration + TxErrCollision; }
+
     
 private:
     /* n queue items share the whole buffer */

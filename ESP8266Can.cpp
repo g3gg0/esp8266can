@@ -88,14 +88,12 @@ extern "C"
         
         while (getCycleCount() < cyclesStart)
         {
-        #if 0
             if(!(GPIO_REG_READ(GPIO_IN_ADDRESS) & pinRegisterRx))
             {
                 /* return busy */
                 intEnable(old_ints);
                 return ERR_BUSY_LINE;
             }
-        #endif
         }
 
         /* first bit always dominant */
@@ -191,7 +189,7 @@ extern "C"
                 bool rxRecessive = ((GPIO_REG_READ(GPIO_IN_ADDRESS) & pinRegisterRx) != 0);
                 
                 /* and check if the RX line is the same as the TX line */
-                if(/* !!!!!!!!!!!!!!!!!!TEST!!!!!!!!!!!!!!!!!! */ 0 && rxRecessive != txRecessive)
+                if(rxRecessive != txRecessive)
                 {
                     if(rxRecessive)
                     {
@@ -396,10 +394,10 @@ extern "C"
     }
 }
 
-ESP8266Can::ESP8266Can(uint32_t rate, uint8_t gpio_tx) : 
+ESP8266Can::ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx) : 
     _rate(rate), 
     _gpio_tx(gpio_tx), 
-    _gpio_rx(D6),
+    _gpio_rx(gpio_rx),
     _maxTries(1024)
 {
     digitalWrite(_gpio_tx, HIGH);
@@ -564,7 +562,7 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
     if(millis() - lastTime > 10000)
     {
         lastTime = millis();
-        Serial.printf("[ESP8266Can] Rx: %d, Tx: %d  |  RxQueueErr: %d, RxErr: %d, TxErr: %d\n", RxSuccess, TxSuccess, RxQueueOverflows, RxErrStuffBits + RxErrCrc + RxErrFormat + RxErrAck, TxErrLineBusy + TxErrTransceiver + TxErrNoAck + TxErrArbitration + TxErrCollision);
+        Serial.printf("[ESP8266Can] Rx: %d, Tx: %d  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d\n", RxSuccess, TxSuccess, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount);
     }
     
     /* dump CAN frames - to console for now */
