@@ -55,56 +55,44 @@ extern "C"
 
     extern void rom_i2c_writeReg_Mask(uint32_t block, uint32_t host_id, uint32_t reg_add, uint32_t Msb, uint32_t Lsb, uint32_t indata);
 
-    static inline uint32_t _getCycleCountRaw()
+    #define xt_ccount() (__extension__({uint32_t ccount; __asm__ __volatile__("rsr %0,ccount":"=a" (ccount)); ccount;}))
+    
+    static inline uint32_t getCycleCount()
     {
-        uint32_t ccount;
+        return xt_ccount();
+    }    
+    
+    static inline uint32_t intDisable()
+    {
+        return xt_rsil(15);
         
-        __asm__ __volatile__("rsr %0,ccount":"=a" (ccount));
-        
-        return ccount;
     }
-    
-    #define _getCycleCount _getCycleCountRaw
-    //#define _getCycleCount _getCycleCountMod
-    
-    static inline uint64_t _getCycleCountMod()
+    static inline void intEnable(uint32_t state)
     {
-        static uint32_t lastValue = 0;
-        static uint64_t overflows = 0;
-        uint32_t ccount;
-        
-        __asm__ __volatile__("rsr %0,ccount":"=a" (ccount));
-        
-        if(ccount < lastValue)
-        {
-            overflows++;
-        }
-        lastValue = ccount;
-        
-        return (overflows << 32) | lastValue;
+        xt_wsr_ps(state);
     }
 
     can_error_t ICACHE_RAM_ATTR sendRawData(uint8_t* buffer, uint32_t cyclesBit, uint32_t cyclesSample, uint16_t skip, uint16_t bits, uint8_t pinRegisterTx, uint8_t pinRegisterRx)
     {
-        /*  */
-        while(_getCycleCount() > (0xFFFFFFFF - ((30 + 19 + 64 + 10 + 50) * cyclesBit)));
+        /* disable interrupts */
+        uint32_t old_ints = intDisable();
+        
+        /* wait till timer overflows */
+        while(getCycleCount() > (0xFFFFFFFF - (512 * cyclesBit)));
         
         uint8_t ackSlot = bits - 8;
-        uint64_t cyclesStart = _getCycleCount();
-        
-        /* disable interrupts */
-        uint32_t _state = xt_rsil(15);
+        uint32_t cyclesStart = getCycleCount();
         
         /* make sure the line is recessive for n consecutive bits */
         cyclesStart += (30 * cyclesBit);
         
-        while (_getCycleCount() < cyclesStart)
+        while (getCycleCount() < cyclesStart)
         {
         #if 0
             if(!(GPIO_REG_READ(GPIO_IN_ADDRESS) & pinRegisterRx))
             {
                 /* return busy */
-                xt_wsr_ps(_state);
+                intEnable(old_ints);
                 return ERR_BUSY_LINE;
             }
         #endif
@@ -148,7 +136,7 @@ extern "C"
                     recessiveBits = 0;
                     
                     /* wait till last bit ends */
-                    while (_getCycleCount() < cyclesStart)
+                    while (getCycleCount() < cyclesStart)
                     {
                     }
                 
@@ -162,7 +150,7 @@ extern "C"
                     recessiveBits = 1;
                     
                     /* wait till last bit ends */
-                    while (_getCycleCount() < cyclesStart)
+                    while (getCycleCount() < cyclesStart)
                     {
                     }
                     
@@ -177,7 +165,7 @@ extern "C"
                     recessiveBits++;
                     
                     /* wait till last bit (or stuff bit) ends */
-                    while (_getCycleCount() < cyclesStart)
+                    while (getCycleCount() < cyclesStart)
                     {
                     }
                     GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
@@ -188,14 +176,14 @@ extern "C"
                     dominantBits++;
                     
                     /* wait till last bit (or stuff bit) ends */
-                    while (_getCycleCount() < cyclesStart)
+                    while (getCycleCount() < cyclesStart)
                     {
                     }
                     GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, pinRegisterTx);
                 }
                 
                 /* wait until we shall sample the RX line */
-                while (_getCycleCount() < (cyclesStart + cyclesSample))
+                while (getCycleCount() < (cyclesStart + cyclesSample))
                 {
                 }
 
@@ -209,7 +197,7 @@ extern "C"
                     {
                         /* abort, transceiver seems not to send. sent dominant, but received recessive */
                         GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
-                        xt_wsr_ps(_state);
+                        intEnable(old_ints);
                         return ERR_TRCV_ERR;
                     }
                     else
@@ -222,7 +210,7 @@ extern "C"
                         {
                             /* abort, there was a collision */
                             GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
-                            xt_wsr_ps(_state);
+                            intEnable(old_ints);
                             return (can_error_t)bitNum;
                         }
                     }                    
@@ -234,7 +222,7 @@ extern "C"
                 {
                     /* if all bits were transferred, return */
                     GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
-                    xt_wsr_ps(_state);
+                    intEnable(old_ints);
                     return ERR_OK;
                 }
                 
@@ -567,17 +555,16 @@ void ESP8266Can::InitI2S(void)
 }
 
 
-void ESP8266Can::Loop(void (*cbr)(uint8_t *frame))
+void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack))
 {
     static uint32_t lastTime = 0;
     uint32_t startTime = millis();
     uint32_t loops = 0;
     
-    if(millis() - lastTime > 1000)
+    if(millis() - lastTime > 10000)
     {
         lastTime = millis();
-        Serial.printf("[ESP8266Can] Rx: %d, RxErr: %d, RxQueueErr: %d\n", RxSuccess, RxErrStuffBits + RxErrCrc + RxErrFormat + RxErrAck, RxQueueOverflows);
-        Serial.printf("[ESP8266Can] Tx: %d, TxErr: %d\n", TxSuccess, TxErrLineBusy + TxErrTransceiver + TxErrNoAck + TxErrArbitration + TxErrCollision);
+        Serial.printf("[ESP8266Can] Rx: %d, Tx: %d  |  RxQueueErr: %d, RxErr: %d, TxErr: %d\n", RxSuccess, TxSuccess, RxQueueOverflows, RxErrStuffBits + RxErrCrc + RxErrFormat + RxErrAck, TxErrLineBusy + TxErrTransceiver + TxErrNoAck + TxErrArbitration + TxErrCollision);
     }
     
     /* dump CAN frames - to console for now */
@@ -592,9 +579,39 @@ void ESP8266Can::Loop(void (*cbr)(uint8_t *frame))
         
         uint8_t *frame_buffer = InterruptReceiveBuffers[ReceiveBuffersReadNum];
         
-        if(cbr)
+        /* try to decode frame */
+        uint16_t id = 0;
+        uint8_t length = 0xFF;
+        uint8_t payload[8];
+        bool req = false;
+        bool ack = false;
+        
+        /* in case of error, dump frames */
+        bool dump = false;
+
+        if(DecodeCanFrame(frame_buffer, &id, &length, payload, &req, &ack, true))
         {
-            cbr(frame_buffer);
+            /* failed. show raw data */
+            dump = true;
+        }
+        else
+        {
+            /* success, call back with decoded data */
+            if(cbr)
+            {
+                cbr(id, req, length, payload, ack);
+            }
+        }
+
+        if(dump)
+        {
+            Serial.printf("raw: ");
+
+            for(int pos = 0; pos < 16; pos++)
+            {
+                Serial.printf("%02X ", frame_buffer[pos]);
+            }
+            Serial.printf("\n");
         }
         
         /* next buffer */
@@ -733,6 +750,8 @@ uint32_t ESP8266Can::DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *leng
         RxErrAck++;
         return 1;
     }
+    
+    RxSuccess++;
     
     return 0;
 }

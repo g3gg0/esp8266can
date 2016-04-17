@@ -42,7 +42,7 @@ public:
     void StopI2S();
     void InitI2S();
     void StartRx();
-    void Loop(void (*cbr)(uint8_t *frame));
+    void Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack));
     ~ESP8266Can();
     can_error_t SendMessage(uint16_t id, uint8_t length, uint8_t *data, bool req_remote = false, bool self_ack = true);
     void BuildCanFrame(uint8_t *buffer, uint16_t id, uint8_t length, uint8_t *data);
