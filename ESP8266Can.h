@@ -69,6 +69,8 @@ public:
     uint32_t TxErrCollision = 0;
     uint32_t TxErrors() { return TxErrLineBusy + TxErrTransceiver + TxErrNoAck + TxErrArbitration + TxErrCollision; }
 
+    uint32_t IntErrors = 0;
+    uint32_t LedPin = 0;
     
 private:
     /* n queue items share the whole buffer */

@@ -243,6 +243,7 @@ extern "C"
         /* parse the received buffer, count all bits in it */
         for(uint32_t wordPos = 0; wordPos < data_length; wordPos++)
         {
+            /* swap words */
             uint32_t thisWord = data[wordPos ^ 1];
             
             /* every element is 16 bits */
@@ -250,15 +251,6 @@ extern "C"
             {
                 uint16_t thisBit = thisWord & 0x8000;
                 
-                /* when enough bits received, we can extract the DLC. just do once until stuffEnd is known */
-                if((ReceiveBitNum >= 19) && (stuffEnd == 0xFF))
-                {
-                    uint8_t length = 0;
-                    can->DecodeCanFrame(buf, NULL, &length, NULL, NULL, NULL, false);
-                    /* we only need the length to know when there is no stuffing anymore */
-                    stuffEnd = 19 + (length * 8) + 16;
-                }
-            
                 /* if the bit level changed, check how many bits were consecutive high or low */
                 if(thisBit != prevBit)
                 {
@@ -279,17 +271,34 @@ extern "C"
                             /* if this will be a stuff bit, ignore it */
                             if(!undoStuff)
                             {
-                                /* now write the number of bits of the "last" bit level */
-                                if(prevBit)
+                                /* in the output buffer, there are some dummy bits for padding data properly */
+                                uint8_t bufBit = LEADING_BITS + ReceiveBitNum;
+                                uint8_t bufByte = bufBit / 8;
+                                uint8_t bitVal = 1 << (7 - (bufBit % 8));
+                                
+                                if(bufByte < INT_RX_BUFFER_SIZE)
                                 {
-                                    /* in the output buffer, there are some dummy bits for padding data properly */
-                                    uint8_t bufBit = LEADING_BITS + ReceiveBitNum;
-                                    if(bufBit / 8 < INT_RX_BUFFER_SIZE)
+                                    /* now write the number of bits of the "last" bit level */
+                                    if(prevBit)
                                     {
-                                        buf[(bufBit / 8)] |= 1 << (7 - (bufBit % 8));
+                                        buf[bufByte] |= bitVal;
+                                    }
+                                    else
+                                    {
+                                        buf[bufByte] &= ~bitVal;
+                                    }
+                                    ReceiveBitNum++;
+                
+                                    /* when enough bits received, we can extract the DLC. just do once until stuffEnd is known */
+                                    if((ReceiveBitNum >= 19) && (stuffEnd == 0xFF))
+                                    {
+                                        uint8_t length = 0;
+                                        
+                                        /* we only need the length to know when there is no stuffing anymore */
+                                        can->DecodeCanFrame(buf, NULL, &length, NULL, NULL, NULL, false);
+                                        stuffEnd = 19 + (length * 8) + 16;
                                     }
                                 }
-                                ReceiveBitNum++;
                             }
                             undoStuff = false;
                             
@@ -314,20 +323,17 @@ extern "C"
                     consecutiveBits = 1;
                     prevBit = thisBit;
                 }
-                else if(consecutiveBits < 8 * RxOversampling)
+                else if(consecutiveBits < 9 * RxOversampling)
                 {
                     /* another bit of the same level until 8 bits of the same level were seen */
                     consecutiveBits++;
                 }
-                else if(ReceiveBitNum > 0)
+                else if(ReceiveBitNum > 0 && thisBit)
                 {
-                    /* message ends, too many bits with same level */
-                    //buf[0] = length;
-                    
-                    ReceiveBuffersWriteNum = ((ReceiveBuffersWriteNum + 1) % INT_RX_BUFFERS);
+                    /* finish frame when line is going recessive for more than 8 bits */
                     ReceiveBitNum = 0;
+                    ReceiveBuffersWriteNum = ((ReceiveBuffersWriteNum + 1) % INT_RX_BUFFERS);
                     buf = InterruptReceiveBuffers[ReceiveBuffersWriteNum];
-                    memset(buf, 0x00, INT_RX_BUFFER_SIZE);
                     
                     /* reset per-frame information */
                     stuffEnd = 0xFF;
@@ -347,14 +353,16 @@ extern "C"
     
     static void ICACHE_RAM_ATTR i2sInterrupt(ESP8266Can *can) 
     {
+        GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
+        
         uint32_t slc_intr_status = READ_PERI_REG(SLC_INT_STATUS);
         WRITE_PERI_REG(SLC_INT_CLR, 0xFFFFFFFF);
         
         /* wait, that should not happen? */
         if(!slc_intr_status)
         {
-            Serial.printf("zero status\n"); 
-            return;            
+            can->StopI2S();
+            can->IntErrors++;
         }
 
         /* the Rx interrupt happened - this is TRANSMITTED data! */
@@ -367,7 +375,6 @@ extern "C"
             /* prepare item for requeue */
             struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_RX_EOF_DES_ADDR);
             completed->owner = 1;
-            
         }
         
         /* the Tx interrupt handled, which is the data we RECEIVE. weird, ya. */
@@ -389,8 +396,11 @@ extern "C"
         
         if(slc_intr_status)
         {
-            Serial.printf("unknown status: 0x%08X\n", slc_intr_status);        
+            can->StopI2S();
+            can->IntErrors++; 
         }
+        
+        GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
     }
 }
 
@@ -398,7 +408,7 @@ ESP8266Can::ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx) :
     _rate(rate), 
     _gpio_tx(gpio_tx), 
     _gpio_rx(gpio_rx),
-    _maxTries(1024)
+    _maxTries(100)
 {
     digitalWrite(_gpio_tx, HIGH);
     pinMode(_gpio_rx, INPUT);
@@ -427,21 +437,15 @@ void ESP8266Can::StartRx()
 
 void ESP8266Can::StartI2S()
 {
-	/* start transmission for RX and TX */
-	SET_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_START);
+	/* start transmission for RX and TX, no idea why both are needed */
 	SET_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
-    
-	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
-	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_TX_START);
+	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START | I2S_I2S_TX_START);
 }
 
 void ESP8266Can::StopI2S()
 {
-	/* stop transmission for RX and TX */
-	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
-	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_TX_START);
-    
-	CLEAR_PERI_REG_MASK(SLC_RX_LINK, SLC_RXLINK_START);
+	/* stop transmission for both RX and TX */
+	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START | I2S_I2S_TX_START);
 	CLEAR_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
 }
 
@@ -463,34 +467,24 @@ void ESP8266Can::PrepareQueue(const char *name, struct slc_queue_item *queue, ui
         queue[num].unused = 0;
         queue[num].next_link_ptr = (uint32_t)&queue[nextNum];
         
-        //Serial.printf("%s[%d] (0x%08X) with %d bytes, buf_ptr (0x%08X), next %d (0x%08X)\n", name, num, &queue[num], queue[num].datalen, queue[num].buf_ptr, nextNum, queue[num].next_link_ptr);
+        if(_debug)
+        {
+            Serial.printf("%s[%d] (0x%08X) with %d bytes, buf_ptr (0x%08X), next %d (0x%08X)\n", name, num, &queue[num], queue[num].datalen, queue[num].buf_ptr, nextNum, queue[num].next_link_ptr);
+        }
     }
 }
 
 void ESP8266Can::InitI2S(void) 
 {
     /* ----------------- setup buffers ----------------- */
-    
-    /* fill with dummy data */
-    memset((void *)I2SBufferRxData, 0xDE, sizeof(I2SBufferRxData));
-    memset((void *)I2SBufferTxData, 0xAD, sizeof(I2SBufferTxData));
 
     /* prepare linked DMA descriptors, having EOF set for all RX slots */
-    PrepareQueue("I2SQueueRx", I2SQueueRx, COUNT(I2SQueueRx), I2SBufferRxData, sizeof(I2SBufferRxData), 0);
     PrepareQueue("I2SQueueTx", I2SQueueTx, COUNT(I2SQueueTx), I2SBufferTxData, sizeof(I2SBufferTxData), 1);
-    
     
     /* ----------------- setup IO ----------------- */
 
     /* configure IO pins */
 	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDI_U, FUNC_I2SI_DATA);
-	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTMS_U, FUNC_I2SI_WS);
-	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTCK_U, FUNC_I2SI_BCK);
-    
-	PIN_FUNC_SELECT(PERIPHS_IO_MUX_U0RXD_U, FUNC_I2SO_DATA);
-	PIN_FUNC_SELECT(PERIPHS_IO_MUX_GPIO2_U, FUNC_I2SO_WS);
-	PIN_FUNC_SELECT(PERIPHS_IO_MUX_MTDO_U, FUNC_I2SO_BCK);
-    
     
     /* ----------------- setup I2S ----------------- */
     
@@ -509,39 +503,27 @@ void ESP8266Can::InitI2S(void)
 	CLEAR_SET_REG_POS(I2SCONF, I2S_BCK_DIV_NUM_S, I2S_BCK_DIV_NUM, (bestBckDiv)&I2S_BCK_DIV_NUM);
 	CLEAR_SET_REG_POS(I2SCONF, I2S_CLKM_DIV_NUM_S, I2S_CLKM_DIV_NUM, (bestClkmDiv)&I2S_CLKM_DIV_NUM);
     
-    
     /* Select 16bits per channel (FIFO_MOD=0), no DMA access (FIFO only) */
-	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_RX_FIFO_MOD_S, I2S_I2S_RX_FIFO_MOD, 0);
 	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_TX_FIFO_MOD_S, I2S_I2S_TX_FIFO_MOD, 0);
-	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_RX_DATA_NUM_S, I2S_I2S_RX_DATA_NUM, 0);
 	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_TX_DATA_NUM_S, I2S_I2S_TX_DATA_NUM, 0);
     
     /* Enable SLC DMA in I2S subsystem */
 	CLEAR_SET_REG_POS(I2S_FIFO_CONF, 0, I2S_I2S_DSCR_EN, I2S_I2S_DSCR_EN);
     
     /* set dual channel data (CHAN_MOD=0) */
-	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_RX_CHAN_MOD_S, I2S_RX_CHAN_MOD, 0);
 	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_TX_CHAN_MOD_S, I2S_TX_CHAN_MOD, 0);
-    
-    /* set maximum I2S FIFO size to be transferred at once (in units of 4 bytes) */
-	CLEAR_SET_REG_POS(I2SRXEOF_NUM, I2S_I2S_RX_EOF_NUM_S, I2S_I2S_RX_EOF_NUM, 128);
-    
     
     /* ----------------- setup SLC ----------------- */
 
     /* reset DMA */
 	SET_PERI_REG_MASK(SLC_CONF0, SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
     CLEAR_PERI_REG_MASK(SLC_CONF0, SLC_RXLINK_RST|SLC_TXLINK_RST|SLC_AHBM_RST|SLC_AHBM_FIFO_RST);
-    
 	SET_PERI_REG_MASK(SLC_CONF0, SLC_TX_LOOP_TEST|SLC_RX_LOOP_TEST|SLC_RX_AUTO_WRBACK|SLC_RX_NO_RESTART_CLR|SLC_DATA_BURST_EN|SLC_DSCR_BURST_EN);
   
 	/* Enable and configure DMA */
 	CLEAR_SET_REG_POS(SLC_CONF0, SLC_MODE_S, SLC_MODE, 1);
-    
-	SET_PERI_REG_MASK(SLC_RX_DSCR_CONF, SLC_INFOR_NO_REPLACE|SLC_TOKEN_NO_REPLACE);
 
     /* configure the first descriptors */
-	CLEAR_SET_REG_POS(SLC_RX_LINK, 0, SLC_RXLINK_DESCADDR_MASK, I2SQueueRx);
 	CLEAR_SET_REG_POS(SLC_TX_LINK, 0, SLC_TXLINK_DESCADDR_MASK, I2SQueueTx);
 
     /* set up SLC interrupt */
@@ -552,17 +534,16 @@ void ESP8266Can::InitI2S(void)
     ETS_SLC_INTR_ENABLE();
 }
 
-
 void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack))
 {
     static uint32_t lastTime = 0;
     uint32_t startTime = millis();
     uint32_t loops = 0;
     
-    if(millis() - lastTime > 10000)
+    if(millis() - lastTime > 500)
     {
         lastTime = millis();
-        Serial.printf("[ESP8266Can] Rx: %d, Tx: %d  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d\n", RxSuccess, TxSuccess, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount);
+        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrors);
     }
     
     /* dump CAN frames - to console for now */
@@ -719,7 +700,6 @@ uint32_t ESP8266Can::DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *leng
     if(length_field > 8)
     {
         Serial.printf("length err (%d>8) ", length_field);
-        
         RxErrFormat++;
         return 1;
     }
@@ -728,7 +708,6 @@ uint32_t ESP8266Can::DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *leng
     if(crc != crc_calced)
     {
         Serial.printf("CRC: 0x%04X/0x%04X ", crc, crc_calced);
-        
         RxErrCrc++;
         return 1;
     }
@@ -765,12 +744,13 @@ can_error_t ESP8266Can::SendMessage(uint16_t id, uint8_t length, uint8_t *data, 
     can_error_t ret = ERR_BUSY_LINE;
     
     /* this is not very elegant and probably violates the standard, but it's good enough */
-    for(int tries = 0; tries < _maxTries; tries++)
+    for(uint32_t tries = 0; tries < _maxTries; tries++)
     {
         if(_debug)
         {
             Serial.printf("[CAN] Send ID:0x%03X, %d byte: ", id, length);            
         }
+        
         can_error_t bitPos = sendRawData(buffer, cyclesBit(), cyclesSample(), LEADING_BITS, bits, pinRegisterTx(), pinRegisterRx());
         
         /* check why transmission failed */
@@ -835,11 +815,6 @@ can_error_t ESP8266Can::SendMessage(uint16_t id, uint8_t length, uint8_t *data, 
             TxErrCollision++;
             ret = ERR_COLLISION;
         }
-        
-        /* wait a msec and try again */
-        delay(1);
-        
-        ESP.wdtFeed();
     }
     
     return ret;
