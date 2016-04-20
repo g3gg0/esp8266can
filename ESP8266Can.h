@@ -7,7 +7,7 @@
 /* per CANopen spec it's 87.5% at 500kbps some websites say :) */
 #define BIT_SAMPLING_POINT (15.0f)
 
-#define INT_RX_BUFFERS     (800)
+#define INT_RX_BUFFERS     (64)
 #define INT_RX_BUFFER_SIZE (14) /* worst case: 1+11+3+4+64+15+1+2+10 bits */
 
 /* error/status codes for SendMessage and internal functions */
@@ -46,7 +46,7 @@ public:
     ~ESP8266Can();
     can_error_t SendMessage(uint16_t id, uint8_t length, uint8_t *data, bool req_remote = false, bool self_ack = true);
     void BuildCanFrame(uint8_t *buffer, uint16_t id, uint8_t length, uint8_t *data);
-    uint32_t DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *length, uint8_t *data, bool *req_remote, bool *ack, bool errors);
+    uint32_t DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *length, uint8_t *data, bool *req_remote, bool *ack, bool onlyBasic);
     
     uint32_t cyclesBit() { return (uint32_t)(F_CPU / _rate); }
     uint32_t cyclesSample() { return (uint32_t)(cyclesBit() * BIT_SAMPLING_POINT / 100.0f); }
@@ -71,13 +71,12 @@ public:
 
     uint32_t IntErrors = 0;
     uint32_t LedPin = 0;
+    struct slc_queue_item *_queueItem;
     
 private:
     /* n queue items share the whole buffer */
-    struct slc_queue_item I2SQueueRx[1];
-    struct slc_queue_item I2SQueueTx[6];
-    uint8_t I2SBufferRxData[128];
-    uint8_t I2SBufferTxData[1024 * 6];
+    struct slc_queue_item I2SQueueTx[5];
+    uint8_t I2SBufferTxData[2048 * 5];
     
     /*
         CLK_I2S = 160MHz  / I2S_CLKM_DIV_NUM
@@ -86,10 +85,12 @@ private:
         I2S_CLKM_DIV_NUM - 5-127  must be >5 for I2S data
         I2S_BCK_DIV_NUM - 2-127
     */
-    uint32_t bestClkmDiv = 13;
-    uint32_t bestBckDiv = 8;
+    const uint32_t bestClkmDiv = 13;
+    const uint32_t bestBckDiv = 8;
+    const uint32_t _lineFreeBitcount = 10;
     
     bool _debug = false; 
+    bool _rxStarted = false; 
     uint32_t _rate; 
     uint8_t _gpio_tx;
     uint8_t _gpio_rx;

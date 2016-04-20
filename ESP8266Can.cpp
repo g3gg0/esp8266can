@@ -51,7 +51,8 @@ extern "C"
     static uint8_t ReceiveBitNum = 0;
     static uint32_t InterruptRxCount = 0;
     static uint32_t InterruptTxCount = 0;
-    static uint8_t RxOversampling; 
+    static uint8_t RxOversampling = 0;
+    static uint8_t BitSamplingTable[128];
 
     extern void rom_i2c_writeReg_Mask(uint32_t block, uint32_t host_id, uint32_t reg_add, uint32_t Msb, uint32_t Lsb, uint32_t indata);
 
@@ -78,13 +79,13 @@ extern "C"
         uint32_t old_ints = intDisable();
         
         /* wait till timer overflows */
-        while(getCycleCount() > (0xFFFFFFFF - (512 * cyclesBit)));
+        while(getCycleCount() > (0xFFFFFFFF - ((121 + _lineFreeBitcount) * cyclesBit)));
         
         uint8_t ackSlot = bits - 8;
         uint32_t cyclesStart = getCycleCount();
         
         /* make sure the line is recessive for n consecutive bits */
-        cyclesStart += (30 * cyclesBit);
+        cyclesStart += (_lineFreeBitcount * cyclesBit);
         
         while (getCycleCount() < cyclesStart)
         {
@@ -232,10 +233,10 @@ extern "C"
     
     static void ICACHE_RAM_ATTR parseBuffer(ESP8266Can *can, uint16_t *data, uint32_t data_length)
     {
-        static uint8_t consecutiveBits = 0;
-        static uint16_t prevBit = 0;
-        static uint8_t stuffEnd = 0xFF;
-        static bool undoStuff = false;
+        static uint32_t consecutiveBits = 0;
+        static uint32_t prevBit = 0;
+        static uint32_t stuffEnd = 0xFFFFFFFF;
+        static uint32_t undoStuff = 0;
         
         /* where to store the CAN frame data */
         uint8_t *buf = InterruptReceiveBuffers[ReceiveBuffersWriteNum];
@@ -249,13 +250,13 @@ extern "C"
             /* every element is 16 bits */
             for(uint32_t bitPos = 0; bitPos < 16; bitPos++)
             {
-                uint16_t thisBit = thisWord & 0x8000;
+                uint32_t thisBit = thisWord & 0x8000;
                 
                 /* if the bit level changed, check how many bits were consecutive high or low */
                 if(thisBit != prevBit)
                 {
                     /* append (oversampled) bit count or terminate buffer */
-                    if(ReceiveBitNum == 0 && prevBit)
+                    if((ReceiveBitNum == 0) && prevBit)
                     {
                         /* received n bits of *recessive* data before our frame starts.
                            this is the "inactive" bus. just throw these bits away. */
@@ -263,44 +264,37 @@ extern "C"
                     else
                     {
                         /* now calculate how many bits were received */
-                        uint8_t bits = (consecutiveBits + RxOversampling / 2) / RxOversampling;
+                        uint32_t bits = BitSamplingTable[consecutiveBits];
                         
                         /* process that number of bits */
-                        for(uint8_t bit = 0; bit < bits; bit++)
+                        for(uint32_t bit = 0; bit < bits; bit++)
                         {
                             /* if this will be a stuff bit, ignore it */
                             if(!undoStuff)
                             {
                                 /* in the output buffer, there are some dummy bits for padding data properly */
-                                uint8_t bufBit = LEADING_BITS + ReceiveBitNum;
-                                uint8_t bufByte = bufBit / 8;
-                                uint8_t bitVal = 1 << (7 - (bufBit % 8));
+                                uint32_t bufBit = LEADING_BITS + ReceiveBitNum;
+                                uint32_t bufByte = (bufBit >> 3);
                                 
                                 if(bufByte < INT_RX_BUFFER_SIZE)
                                 {
-                                    /* now write the number of bits of the "last" bit level */
+                                    /* now write the bit value of the "last" bit level */
                                     if(prevBit)
                                     {
-                                        buf[bufByte] |= bitVal;
-                                    }
-                                    else
-                                    {
-                                        buf[bufByte] &= ~bitVal;
+                                        buf[bufByte] |= (0x80 >> (bufBit & 0x07));
                                     }
                                     ReceiveBitNum++;
                 
                                     /* when enough bits received, we can extract the DLC. just do once until stuffEnd is known */
-                                    if((ReceiveBitNum >= 19) && (stuffEnd == 0xFF))
+                                    if((stuffEnd == 0xFFFFFFFF) && (ReceiveBitNum >= 19))
                                     {
-                                        uint8_t length = 0;
-                                        
                                         /* we only need the length to know when there is no stuffing anymore */
-                                        can->DecodeCanFrame(buf, NULL, &length, NULL, NULL, NULL, false);
+                                        uint8_t length = can->DecodeCanFrame(buf, NULL, NULL, NULL, NULL, NULL, true);
                                         stuffEnd = 19 + (length * 8) + 16;
                                     }
                                 }
                             }
-                            undoStuff = false;
+                            undoStuff = 0;
                             
                             /* only handle stuff bits until reaching ACK */
                             if(ReceiveBitNum < stuffEnd)
@@ -308,7 +302,7 @@ extern "C"
                                 /* 5th bit in row of the same level, insert a stuff bit */
                                 if(bit == 4)
                                 {
-                                    undoStuff = true;
+                                    undoStuff = 1;
                                 }
                                 else if(bit >= 5)
                                 {
@@ -334,9 +328,10 @@ extern "C"
                     ReceiveBitNum = 0;
                     ReceiveBuffersWriteNum = ((ReceiveBuffersWriteNum + 1) % INT_RX_BUFFERS);
                     buf = InterruptReceiveBuffers[ReceiveBuffersWriteNum];
+                    memset(buf, 0x00, INT_RX_BUFFER_SIZE);
                     
                     /* reset per-frame information */
-                    stuffEnd = 0xFF;
+                    stuffEnd = 0xFFFFFFFF;
                     
                     /* if we now - after incrementing - hit again the read buffer, we have an overrun */
                     if(ReceiveBuffersWriteNum == ReceiveBuffersReadNum)
@@ -351,8 +346,20 @@ extern "C"
         }
     }
     
+    void processQueueItem(ESP8266Can *can) 
+    {
+        /* go through all bits and count them, passing information to main loop context */
+        parseBuffer(can, (uint16_t *)can->_queueItem->buf_ptr, can->_queueItem->datalen / 2);
+        
+        can->_queueItem->owner = 1;
+        can->_queueItem = (struct slc_queue_item *)can->_queueItem->next_link_ptr;
+    }
+    
     static void ICACHE_RAM_ATTR i2sInterrupt(ESP8266Can *can) 
     {
+        static uint32_t last_exec_time = 0;
+        
+        
         GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
         
         uint32_t slc_intr_status = READ_PERI_REG(SLC_INT_STATUS);
@@ -365,33 +372,28 @@ extern "C"
             can->IntErrors++;
         }
 
-        /* the Rx interrupt happened - this is TRANSMITTED data! */
-        if((slc_intr_status & SLC_RX_EOF_INT_ST))
-        {
-            /* reset flag */
-            slc_intr_status &= ~SLC_RX_EOF_INT_ST;
-            InterruptRxCount++;     
-            
-            /* prepare item for requeue */
-            struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_RX_EOF_DES_ADDR);
-            completed->owner = 1;
-        }
-        
-        /* the Tx interrupt handled, which is the data we RECEIVE. weird, ya. */
+        /* the Tx interrupt handler, which is the data we RECEIVE. weird, ya. */
         if((slc_intr_status & SLC_TX_EOF_INT_ST))
         {
             /* reset flag */
             slc_intr_status &= ~SLC_TX_EOF_INT_ST;
             InterruptTxCount++;
             
-            /* fetch filled buffer */
+            /* which one is the "last" finished one? */
             struct slc_queue_item *completed = (struct slc_queue_item*)READ_PERI_REG(SLC_TX_EOF_DES_ADDR);
+            WRITE_PERI_REG(SLC_TX_EOF_DES_ADDR, 0x00000000);
             
-            /* go through all bits and count them, passing information to main loop context */
-            parseBuffer(can, (uint16_t *)completed->buf_ptr, completed->datalen / 2);
-            
-            /* prepare item for requeue */
-            completed->owner = 1;
+            if(completed)
+            {
+                /* go through all previous items */
+                while(can->_queueItem != completed)
+                {
+                    processQueueItem(can);
+                }
+                
+                /* and the finished ones */
+                processQueueItem(can);
+            }
         }
         
         if(slc_intr_status)
@@ -399,6 +401,15 @@ extern "C"
             can->StopI2S();
             can->IntErrors++; 
         }
+        
+        uint32_t this_exec_time = getCycleCount();
+        
+        if(this_exec_time - last_exec_time < 1000)
+        {
+            can->StopI2S();
+            can->IntErrors++; 
+        }
+        last_exec_time = this_exec_time;
         
         GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
     }
@@ -429,9 +440,16 @@ void ESP8266Can::StartRx()
     Serial.printf("   Samplingrate: %d\n", (BASEFREQ / bestClkmDiv / bestBckDiv));
     Serial.printf("   Oversampling: %d\n", RxOversampling);
     
+    for(uint32_t pos = 0; pos < COUNT(BitSamplingTable); pos++)
+    {
+        uint8_t bits = (pos + RxOversampling / 2) / RxOversampling;
+        BitSamplingTable[pos] = bits;
+    }
+    
     memset(InterruptReceiveBuffers, 0x00, sizeof(InterruptReceiveBuffers));
     InitI2S();
     StartI2S();
+    _rxStarted = true;
     Serial.printf("Started\n");
 }
 
@@ -480,6 +498,7 @@ void ESP8266Can::InitI2S(void)
 
     /* prepare linked DMA descriptors, having EOF set for all RX slots */
     PrepareQueue("I2SQueueTx", I2SQueueTx, COUNT(I2SQueueTx), I2SBufferTxData, sizeof(I2SBufferTxData), 1);
+    _queueItem = I2SQueueTx;
     
     /* ----------------- setup IO ----------------- */
 
@@ -568,7 +587,7 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
         /* in case of error, dump frames */
         bool dump = false;
 
-        if(DecodeCanFrame(frame_buffer, &id, &length, payload, &req, &ack, true))
+        if(DecodeCanFrame(frame_buffer, &id, &length, payload, &req, &ack, false))
         {
             /* failed. show raw data */
             dump = true;
@@ -658,20 +677,28 @@ uint32_t ESP8266Can::BuildCanFrame(uint8_t *buffer, uint16_t id, uint8_t length,
 }
 
 /*  */
-uint32_t ESP8266Can::DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *length, uint8_t *data, bool *req_remote, bool *ack, bool errors)
+uint32_t ESP8266Can::DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *length, uint8_t *data, bool *req_remote, bool *ack, bool lengthOnly)
 {
     if(id)
     {
         *id = ((uint16_t)buffer[0] << 9) | ((uint16_t)buffer[1] << 1) | (buffer[2] >> 7);
     }
+    uint8_t length_field = (buffer[2] & 0x0F);
+    uint8_t length_value = (length_field <= 8) ? length_field : 0;
+    
+    if(length)
+    {
+        *length = length_value;
+    }
+    
+    if(lengthOnly)
+    {
+        return length_value;
+    }
+    
     if(req_remote)
     {
         *req_remote = (buffer[2] & 0x40) != 0;
-    }
-    uint8_t length_field = (buffer[2] & 0x0F);
-    if(length)
-    {
-        *length = (length_field <= 8) ? length_field : 0;
     }
     
     bool id_ext = (buffer[2] & 0x20) != 0;
@@ -689,11 +716,6 @@ uint32_t ESP8266Can::DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *leng
     if(ack)
     {
         *ack = !((buffer[5 + *length] & 0x80) != 0);
-    }
-    
-    if(!errors)
-    {
-        return 0;
     }
     
     /* DLC can go from 0 to 8 */
@@ -751,6 +773,18 @@ can_error_t ESP8266Can::SendMessage(uint16_t id, uint8_t length, uint8_t *data, 
             Serial.printf("[CAN] Send ID:0x%03X, %d byte: ", id, length);            
         }
         
+        /* first wait for the interrupt doing it's work. might still have some jitter but should do its job most of the time. */
+        if(_rxStarted)
+        {
+            struct slc_queue_item *last_queueItem = _queueItem;
+    
+            while(last_queueItem == _queueItem)
+            {
+                ESP.wdtFeed();
+            }
+        }
+        
+        /* now, probably right after the interrupt, send the data to be sent */
         can_error_t bitPos = sendRawData(buffer, cyclesBit(), cyclesSample(), LEADING_BITS, bits, pinRegisterTx(), pinRegisterRx());
         
         /* check why transmission failed */
