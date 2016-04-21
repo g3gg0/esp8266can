@@ -46,13 +46,20 @@ extern "C"
     /* intentionally keeping them as global variable because having them in class makes the code slower. 
        Defining as class members has no benefit as we can only be instanciated once anyway. */
     static uint8_t InterruptReceiveBuffers[INT_RX_BUFFERS][INT_RX_BUFFER_SIZE];
-    static uint8_t ReceiveBuffersReadNum = 0;
-    static uint8_t ReceiveBuffersWriteNum = 0;
-    static uint8_t ReceiveBitNum = 0;
+    static uint32_t ReceiveBuffersReadNum = 0;
+    static uint32_t ReceiveBuffersWriteNum = 0;
+    static uint32_t ReceiveBitNum = 0;
     static uint32_t InterruptRxCount = 0;
     static uint32_t InterruptTxCount = 0;
-    static uint8_t RxOversampling = 0;
+    static uint32_t RxOversampling = 0;
     static uint8_t BitSamplingTable[128];
+    
+    static uint32_t config_cyclesBit = 0;
+    static uint32_t config_cyclesSample = 0;
+    static uint32_t config_skip = 0;
+    static uint32_t config_pinRegisterTx = 0;
+    static uint32_t config_pinRegisterRx = 0;
+    static const uint32_t config_lineFreeBitCount = 10;
 
     extern void rom_i2c_writeReg_Mask(uint32_t block, uint32_t host_id, uint32_t reg_add, uint32_t Msb, uint32_t Lsb, uint32_t indata);
 
@@ -73,23 +80,24 @@ extern "C"
         xt_wsr_ps(state);
     }
 
-    can_error_t ICACHE_RAM_ATTR sendRawData(uint8_t* buffer, uint32_t cyclesBit, uint32_t cyclesSample, uint16_t skip, uint16_t bits, uint8_t pinRegisterTx, uint8_t pinRegisterRx)
+    can_error_t ICACHE_RAM_ATTR sendRawData(uint8_t* buffer, uint32_t bits)
     {
         /* disable interrupts */
         uint32_t old_ints = intDisable();
         
         /* wait till timer overflows */
-        while(getCycleCount() > (0xFFFFFFFF - ((121 + _lineFreeBitcount) * cyclesBit)));
+        while(getCycleCount() > (0xFFFFFFFF - ((121 + config_lineFreeBitCount + 10 /* backup */) * config_cyclesBit)));
         
-        uint8_t ackSlot = bits - 8;
+        uint32_t ackSlot = bits - 8;
         uint32_t cyclesStart = getCycleCount();
+        uint32_t skip = config_skip;
         
         /* make sure the line is recessive for n consecutive bits */
-        cyclesStart += (_lineFreeBitcount * cyclesBit);
+        cyclesStart += (config_lineFreeBitCount * config_cyclesBit);
         
         while (getCycleCount() < cyclesStart)
         {
-            if(!(GPIO_REG_READ(GPIO_IN_ADDRESS) & pinRegisterRx))
+            if(!(GPIO_REG_READ(GPIO_IN_ADDRESS) & config_pinRegisterRx))
             {
                 /* return busy */
                 intEnable(old_ints);
@@ -98,19 +106,19 @@ extern "C"
         }
 
         /* first bit always dominant */
-        GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, pinRegisterTx);
+        GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, config_pinRegisterTx);
         
         /* now write the bits */
         can_error_t ret = ERR_NO_ACK;
         uint32_t bitNum = 0;
-        uint8_t dominantBits = 0;
-        uint8_t recessiveBits = 0;
+        uint32_t dominantBits = 0;
+        uint32_t recessiveBits = 0;
         
         while (1)
         {
             uint8_t data = *buffer++;
 
-            for (uint8_t mask = 0x80; mask != 0; mask >>= 1)
+            for (uint32_t mask = 0x80; mask != 0; mask >>= 1)
             {
                 /* silently skip the first bits in input buffer */
                 if(skip)
@@ -139,8 +147,8 @@ extern "C"
                     {
                     }
                 
-                    GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, pinRegisterTx);
-                    cyclesStart += cyclesBit;
+                    GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, config_pinRegisterTx);
+                    cyclesStart += config_cyclesBit;
                 }
                 else if(dominantBits == 5)
                 {
@@ -153,8 +161,8 @@ extern "C"
                     {
                     }
                     
-                    GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
-                    cyclesStart += cyclesBit;
+                    GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, config_pinRegisterTx);
+                    cyclesStart += config_cyclesBit;
                 }
                 
                 /* set the TX line */
@@ -167,7 +175,7 @@ extern "C"
                     while (getCycleCount() < cyclesStart)
                     {
                     }
-                    GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
+                    GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, config_pinRegisterTx);
                 }
                 else
                 {
@@ -178,16 +186,16 @@ extern "C"
                     while (getCycleCount() < cyclesStart)
                     {
                     }
-                    GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, pinRegisterTx);
+                    GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, config_pinRegisterTx);
                 }
                 
                 /* wait until we shall sample the RX line */
-                while (getCycleCount() < (cyclesStart + cyclesSample))
+                while (getCycleCount() < (cyclesStart + config_cyclesSample))
                 {
                 }
 
                 /* do so, read the RX line status */
-                bool rxRecessive = ((GPIO_REG_READ(GPIO_IN_ADDRESS) & pinRegisterRx) != 0);
+                bool rxRecessive = ((GPIO_REG_READ(GPIO_IN_ADDRESS) & config_pinRegisterRx) != 0);
                 
                 /* and check if the RX line is the same as the TX line */
                 if(rxRecessive != txRecessive)
@@ -195,7 +203,7 @@ extern "C"
                     if(rxRecessive)
                     {
                         /* abort, transceiver seems not to send. sent dominant, but received recessive */
-                        GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
+                        GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, config_pinRegisterTx);
                         intEnable(old_ints);
                         return ERR_TRCV_ERR;
                     }
@@ -208,7 +216,7 @@ extern "C"
                         else
                         {
                             /* abort, there was a collision */
-                            GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
+                            GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, config_pinRegisterTx);
                             intEnable(old_ints);
                             return (can_error_t)bitNum;
                         }
@@ -220,13 +228,13 @@ extern "C"
                 if(bitNum >= bits)
                 {
                     /* if all bits were transferred, return */
-                    GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, pinRegisterTx);
+                    GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, config_pinRegisterTx);
                     intEnable(old_ints);
                     return ERR_OK;
                 }
                 
                 /* update start timestamp so the next cycle will wait till the bit time is done */
-                cyclesStart += cyclesBit;
+                cyclesStart += config_cyclesBit;
             }
         }
     }
@@ -289,7 +297,7 @@ extern "C"
                                     if((stuffEnd == 0xFFFFFFFF) && (ReceiveBitNum >= 19))
                                     {
                                         /* we only need the length to know when there is no stuffing anymore */
-                                        uint8_t length = can->DecodeCanFrame(buf, NULL, NULL, NULL, NULL, NULL, true);
+                                        uint32_t length = can->DecodeCanFrame(buf, NULL, NULL, NULL, NULL, NULL, true);
                                         stuffEnd = 19 + (length * 8) + 16;
                                     }
                                 }
@@ -349,27 +357,38 @@ extern "C"
     void processQueueItem(ESP8266Can *can) 
     {
         /* go through all bits and count them, passing information to main loop context */
-        parseBuffer(can, (uint16_t *)can->_queueItem->buf_ptr, can->_queueItem->datalen / 2);
+        parseBuffer(can, (uint16_t *)can->CurrentQueueItem->buf_ptr, can->CurrentQueueItem->datalen / 2);
         
-        can->_queueItem->owner = 1;
-        can->_queueItem = (struct slc_queue_item *)can->_queueItem->next_link_ptr;
+        can->CurrentQueueItem->owner = 1;
+        can->CurrentQueueItem = (struct slc_queue_item *)can->CurrentQueueItem->next_link_ptr;
     }
     
     static void ICACHE_RAM_ATTR i2sInterrupt(ESP8266Can *can) 
     {
-        static uint32_t last_exec_time = 0;
-        
-        
-        GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
-        
         uint32_t slc_intr_status = READ_PERI_REG(SLC_INT_STATUS);
         WRITE_PERI_REG(SLC_INT_CLR, 0xFFFFFFFF);
+        
+        static uint32_t last_exec_time = 0;
+        uint32_t this_exec_time = getCycleCount();
+        
+        /* make sure we didn't run only half a msec ago */
+        if((this_exec_time - last_exec_time) < (160000000 / 2000))
+        {
+            can->StopI2S();
+            can->IntErrors++;
+            can->_rxRunning = false;
+            return;
+        }
+        
+        GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
         
         /* wait, that should not happen? */
         if(!slc_intr_status)
         {
             can->StopI2S();
             can->IntErrors++;
+            can->_rxRunning = false;
+            return;
         }
 
         /* the Tx interrupt handler, which is the data we RECEIVE. weird, ya. */
@@ -386,7 +405,7 @@ extern "C"
             if(completed)
             {
                 /* go through all previous items */
-                while(can->_queueItem != completed)
+                while(can->CurrentQueueItem != completed)
                 {
                     processQueueItem(can);
                 }
@@ -399,17 +418,11 @@ extern "C"
         if(slc_intr_status)
         {
             can->StopI2S();
-            can->IntErrors++; 
+            can->IntErrors++;
+            can->_rxRunning = false;
+            return;
         }
-        
-        uint32_t this_exec_time = getCycleCount();
-        
-        if(this_exec_time - last_exec_time < 1000)
-        {
-            can->StopI2S();
-            can->IntErrors++; 
-        }
-        last_exec_time = this_exec_time;
+        last_exec_time = getCycleCount();
         
         GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
     }
@@ -424,6 +437,12 @@ ESP8266Can::ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx) :
     digitalWrite(_gpio_tx, HIGH);
     pinMode(_gpio_rx, INPUT);
     pinMode(_gpio_tx, OUTPUT);
+    
+    config_skip = LEADING_BITS;
+    config_cyclesBit = cyclesBit();
+    config_cyclesSample = cyclesSample();
+    config_pinRegisterTx = pinRegisterTx();
+    config_pinRegisterRx = pinRegisterRx();
 }
 
 ESP8266Can::~ESP8266Can()
@@ -450,6 +469,7 @@ void ESP8266Can::StartRx()
     InitI2S();
     StartI2S();
     _rxStarted = true;
+    _rxRunning = true;
     Serial.printf("Started\n");
 }
 
@@ -498,7 +518,7 @@ void ESP8266Can::InitI2S(void)
 
     /* prepare linked DMA descriptors, having EOF set for all RX slots */
     PrepareQueue("I2SQueueTx", I2SQueueTx, COUNT(I2SQueueTx), I2SBufferTxData, sizeof(I2SBufferTxData), 1);
-    _queueItem = I2SQueueTx;
+    CurrentQueueItem = I2SQueueTx;
     
     /* ----------------- setup IO ----------------- */
 
@@ -563,6 +583,13 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
     {
         lastTime = millis();
         Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrors);
+    }
+    
+    if(_rxStarted && !_rxRunning)
+    {
+        Serial.printf("[ESP8266Can] Restarting I2S\n");
+        StartRx();
+        Serial.printf("[ESP8266Can] Done\n");
     }
     
     /* dump CAN frames - to console for now */
@@ -774,18 +801,18 @@ can_error_t ESP8266Can::SendMessage(uint16_t id, uint8_t length, uint8_t *data, 
         }
         
         /* first wait for the interrupt doing it's work. might still have some jitter but should do its job most of the time. */
-        if(_rxStarted)
+        if(_rxRunning)
         {
-            struct slc_queue_item *last_queueItem = _queueItem;
+            struct slc_queue_item *lastCurrentQueueItem = CurrentQueueItem;
     
-            while(last_queueItem == _queueItem)
+            while(lastCurrentQueueItem == CurrentQueueItem)
             {
                 ESP.wdtFeed();
             }
         }
         
         /* now, probably right after the interrupt, send the data to be sent */
-        can_error_t bitPos = sendRawData(buffer, cyclesBit(), cyclesSample(), LEADING_BITS, bits, pinRegisterTx(), pinRegisterRx());
+        can_error_t bitPos = sendRawData(buffer, bits);
         
         /* check why transmission failed */
         if(bitPos == ERR_BUSY_LINE)

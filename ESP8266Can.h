@@ -71,12 +71,7 @@ public:
 
     uint32_t IntErrors = 0;
     uint32_t LedPin = 0;
-    struct slc_queue_item *_queueItem;
-    
-private:
-    /* n queue items share the whole buffer */
-    struct slc_queue_item I2SQueueTx[5];
-    uint8_t I2SBufferTxData[2048 * 5];
+    struct slc_queue_item *CurrentQueueItem = NULL;
     
     /*
         CLK_I2S = 160MHz  / I2S_CLKM_DIV_NUM
@@ -87,10 +82,16 @@ private:
     */
     const uint32_t bestClkmDiv = 13;
     const uint32_t bestBckDiv = 8;
-    const uint32_t _lineFreeBitcount = 10;
+    bool _rxStarted = false; 
+    bool _rxRunning = false; 
+    
+private:
+    /* n queue items share the whole buffer */
+    struct slc_queue_item I2SQueueTx[5];
+    uint8_t I2SBufferTxData[2048 * 5];
+    
     
     bool _debug = false; 
-    bool _rxStarted = false; 
     uint32_t _rate; 
     uint8_t _gpio_tx;
     uint8_t _gpio_rx;
