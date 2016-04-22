@@ -56,19 +56,28 @@ errors were handled gracefully. The current code base wasn't tested that detaile
 will come as soon I receive an ordered 3.3V transceiver, which will simplify the wiring and setup.
 Currently I need 3.3V for the ESP8266 and 5V/12V for the automotive transceiver.
 
+However, you can connect Rx and Tx and see the library decoding it's own sent packets.
+
 ## Requirements
 
-ESP8266 and a CAN transceiver (e.g. SN65HVD234)
+### Normal setup
+You need an ESP8266 and a CAN transceiver (e.g. SN65HVD234)
 
 Connect GPIO12 plus some other pin you have spare to the R pin (RX) and any other GPIO to 
 the D (Tx) pin of the transceiver. Pass your custom GPIOs to the constructor.
 
+### Loopback
+Connect all pins, both Rx and your Tx pins together, you will now receive the messages you sent - without a transceiver.
+
+### Software
 To start Rx path, call StartRx() and then call Loop() peridically.
 You have to pass the callback routine for new messages to the Loop() call.
 
 It's prototype is:
   void cbr(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack)
 And will be called for every message received.
+
+To send a message, call SendMessage with the right parameters.
 
 
 ## Bugs / Deviations
