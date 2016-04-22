@@ -10,6 +10,7 @@ It features bit-banging Tx code and an interrupt driven Rx path using I2S.
 Sounds good? Read the "Bugs / Deviations" chapter first.
 
 For timing reasons, the Tx code is disabling interrupts for the time being in 
+
 * busy detection,
 * arbitration,
 * and transmit phase
@@ -21,17 +22,19 @@ The received I2S bitstream is being processed in interrupt context, as the data
 uses more than 3x it's net size. Processing raw I2S data in non-irq context thus
 would require a lot of additional RAM.
 
-![Interrupt timing: High means ISR is running](/images/ISR_timing.png?raw=true "ISR Timing")
+![Interrupt timing: High means ISR is running](/images/ISR_timing.png?raw=true "Interrupt timing: High means ISR is running")
 
 The I2S TX interrupt (yeah, TX is for I2SI) is firing every 1.33 msec and executes
 725µs (idle) or 765µs (message received) which results in a CPU load of approx 54-57% 
-just for the Rx path. The good thing, the ISR is very stable in it's execution time 
-and always is within the specified execution time
+just for the Rx path.
 
-![Tx Message successfully decoded using PicoScope](/images/message.png?raw=true "Tx message")
+The good thing, the ISR is very stable in it's execution time and always is within the specified limits.
+
+![Tx Message successfully decoded using PicoScope](/images/message.png?raw=true "Tx Message successfully decoded using PicoScope")
 
 For arbitration and transceiver check during transmission, the bit-banging code requires
 some extra Rx GPIO. We cannot re-use the GPIO12 for this "read-back" due to these reasons:
+
 * would disconnect I2SI_DATA from the pin -> need to handle rx errors properly
 * Rx pin is used during idle detection and arbitration -> would throw away all Rx messages while waiting for a free line
 
@@ -39,6 +42,7 @@ We also cannot magically use I2S "OUT" for Tx'ing because we always have to chec
 no matter if during arbitration or within payload.
 
 The only workaround would be:
+
 * XOR Rx and Tx line, lowpass, pass to a RS flip flop which again disables Tx to transceiver
 * check Rx path if our message could be transmitted - or if it was cancelled during arbitration phase
 Using this extra circuitry, we indeed could use I2S for Tx path too.
@@ -61,6 +65,7 @@ the D (Tx) pin of the transceiver. Pass your custom GPIOs to the constructor.
 
 To start Rx path, call StartRx() and then call Loop() peridically.
 You have to pass the callback routine for new messages to the Loop() call.
+
 It's prototype is:
   void cbr(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack)
 And will be called for every message received.
@@ -90,7 +95,9 @@ Troublesome for devices which insist on ACK and it is the only device on the bus
 ### Incomplete code
 This code is most probably not perfect. It may miss some essential stuff I didnt think of.
 As it is not (yet) 100% tested in a productional environment, it could cause severe bugs.
+
 It does not handle:
+
 * 29 bit identifiers
 * error frames
 * overload frames
