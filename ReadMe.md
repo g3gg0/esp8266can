@@ -79,6 +79,8 @@ This results in 1-2 2k-buffer drops and if we have 100% bus load, drops up to 10
 
 ![I2S error causing 100% load until I2S engine is restarted](/images/ISR_error.png?raw=true "I2S error")
 
+This happens after 904.000 to 905.000 IRQs, which transferred 1.852.416.000 bytes or 463.104.000 I2S stereo frames.
+
 ### No ACK for senders
 Because this code is using the I2S engine to asynchronously sample the CAN Rx path, there is no
 way of ACK'ing someone's message. If your ESP8266 will be the only listeners for this message,
