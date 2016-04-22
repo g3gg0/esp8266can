@@ -7,8 +7,12 @@
 /* per CANopen spec it's 87.5% at 500kbps some websites say :) */
 #define BIT_SAMPLING_POINT (15.0f)
 
-#define INT_RX_BUFFERS     (64)
-#define INT_RX_BUFFER_SIZE (14) /* worst case: 1+11+3+4+64+15+1+2+10 bits */
+#define CAN_RX_BUFFERS     (64)
+#define CAN_RX_BUFFER_SIZE (14) /* worst case: 1+11+3+4+64+15+1+2+10 bits */
+
+#define CAN_BUFFER_SIZE (2048)  
+#define CAN_BUFFER_COUNT (5)
+
 
 /* error/status codes for SendMessage and internal functions */
 typedef enum
@@ -87,8 +91,8 @@ public:
     
 private:
     /* n queue items share the whole buffer */
-    struct slc_queue_item I2SQueueTx[5];
-    uint8_t I2SBufferTxData[2048 * 5];
+    struct slc_queue_item I2SQueueTx[CAN_BUFFER_COUNT];
+    uint8_t I2SBufferTxData[CAN_BUFFER_SIZE * CAN_BUFFER_COUNT];
     
     
     bool _debug = false; 

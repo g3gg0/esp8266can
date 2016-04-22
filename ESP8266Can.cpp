@@ -45,7 +45,7 @@ extern "C"
         
     /* intentionally keeping them as global variable because having them in class makes the code slower. 
        Defining as class members has no benefit as we can only be instanciated once anyway. */
-    static uint8_t InterruptReceiveBuffers[INT_RX_BUFFERS][INT_RX_BUFFER_SIZE];
+    static uint8_t InterruptReceiveBuffers[CAN_RX_BUFFERS][CAN_RX_BUFFER_SIZE];
     static uint32_t ReceiveBuffersReadNum = 0;
     static uint32_t ReceiveBuffersWriteNum = 0;
     static uint32_t ReceiveBitNum = 0;
@@ -284,7 +284,7 @@ extern "C"
                                 uint32_t bufBit = LEADING_BITS + ReceiveBitNum;
                                 uint32_t bufByte = (bufBit >> 3);
                                 
-                                if(bufByte < INT_RX_BUFFER_SIZE)
+                                if(bufByte < CAN_RX_BUFFER_SIZE)
                                 {
                                     /* now write the bit value of the "last" bit level */
                                     if(prevBit)
@@ -334,9 +334,9 @@ extern "C"
                 {
                     /* finish frame when line is going recessive for more than 8 bits */
                     ReceiveBitNum = 0;
-                    ReceiveBuffersWriteNum = ((ReceiveBuffersWriteNum + 1) % INT_RX_BUFFERS);
+                    ReceiveBuffersWriteNum = ((ReceiveBuffersWriteNum + 1) % CAN_RX_BUFFERS);
                     buf = InterruptReceiveBuffers[ReceiveBuffersWriteNum];
-                    memset(buf, 0x00, INT_RX_BUFFER_SIZE);
+                    memset(buf, 0x00, CAN_RX_BUFFER_SIZE);
                     
                     /* reset per-frame information */
                     stuffEnd = 0xFFFFFFFF;
@@ -640,7 +640,7 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
         }
         
         /* next buffer */
-        ReceiveBuffersReadNum = (ReceiveBuffersReadNum + 1) % INT_RX_BUFFERS;
+        ReceiveBuffersReadNum = (ReceiveBuffersReadNum + 1) % CAN_RX_BUFFERS;
     }
 }
 
