@@ -10,9 +10,9 @@ It features bit-banging Tx code and an interrupt driven Rx path using I2S.
 Sounds good? Read the "Bugs / Deviations" chapter first.
 
 For timing reasons, the Tx code is disabling interrupts for the time being in 
- - busy detection,
- - arbitration,
- - and transmit phase
+* busy detection,
+* arbitration,
+* and transmit phase
 and can provide clean bit shape for up to 500 kBaud.
 
 The Rx path uses the (hardwired) I2SI_DATA IO pin GPIO12 with a bit rate of
@@ -32,15 +32,15 @@ and always is within the specified execution time
 
 For arbitration and transceiver check during transmission, the bit-banging code requires
 some extra Rx GPIO. We cannot re-use the GPIO12 for this "read-back" due to these reasons:
- * would disconnect I2SI_DATA from the pin -> need to handle rx errors properly
- * Rx pin is used during idle detection and arbitration -> would throw away all Rx messages while waiting for a free line
+* would disconnect I2SI_DATA from the pin -> need to handle rx errors properly
+* Rx pin is used during idle detection and arbitration -> would throw away all Rx messages while waiting for a free line
 
 We also cannot magically use I2S "OUT" for Tx'ing because we always have to check what we send,
 no matter if during arbitration or within payload.
 
 The only workaround would be:
- * XOR Rx and Tx line, lowpass, pass to a RS flip flop which again disables Tx to transceiver
- * check Rx path if our message could be transmitted - or if it was cancelled during arbitration phase
+* XOR Rx and Tx line, lowpass, pass to a RS flip flop which again disables Tx to transceiver
+* check Rx path if our message could be transmitted - or if it was cancelled during arbitration phase
 Using this extra circuitry, we indeed could use I2S for Tx path too.
 But this is a bit complex and bit banging works just good enough, being closer to the standard.
  
@@ -91,10 +91,10 @@ Troublesome for devices which insist on ACK and it is the only device on the bus
 This code is most probably not perfect. It may miss some essential stuff I didnt think of.
 As it is not (yet) 100% tested in a productional environment, it could cause severe bugs.
 It does not handle:
- * 29 bit identifiers
- * error frames
- * overload frames
- * proper IFS timing
+* 29 bit identifiers
+* error frames
+* overload frames
+* proper IFS timing
 
 ## API Documentation
 
