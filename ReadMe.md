@@ -123,3 +123,12 @@ Setup I2S path and start I2S engine. Needs Loop() to be called periodically.
 #### Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack))
 Handle I2S status changes and process all messages received, passing them to the callback routine.
 
+## Pictures of my prototype
+
+My current prototype uses a ESP8266 NodeMcu (LoLin version) plus a SSD1306 display for visualizing statistics.
+
+It uses the SSD1306 library from squix78 at https://github.com/squix78/esp8266-oled-ssd1306 which has nice
+scrolling pages. Ideal during development and also when in use for serious stuff somewhen later this year.
+
+![Whole setup, with SSD1306 blue/yellow](/images/Whole_prototype.jpg?raw=true "Whole setup, with SSD1306 blue/yellow")
+![Scenario with Rx and Tx disconnected - detecting errors](/images/Display_errors.jpg?raw=true "Scenario with Rx and Tx disconnected - detecting errors")
