@@ -10,8 +10,8 @@
 #define CAN_RX_BUFFERS     (64)
 #define CAN_RX_BUFFER_SIZE (14) /* worst case: 1+11+3+4+64+15+1+2+10 bits */
 
-#define CAN_BUFFER_SIZE (2048)  
-#define CAN_BUFFER_COUNT (5)
+#define CAN_BUFFER_SIZE    (2048)  
+#define CAN_BUFFER_COUNT   (4)
 
 
 /* error/status codes for SendMessage and internal functions */
