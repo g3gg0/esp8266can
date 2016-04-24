@@ -54,6 +54,9 @@ extern "C"
     static uint32_t RxOversampling = 0;
     static uint8_t BitSamplingTable[128];
     
+    static uint32_t RxActiveBits = 0;
+    static uint32_t RxTotalBits = 0;
+    
     static uint32_t config_cyclesBit = 0;
     static uint32_t config_cyclesSample = 0;
     static uint32_t config_skip = 0;
@@ -246,6 +249,8 @@ extern "C"
         static uint32_t stuffEnd = 0xFFFFFFFF;
         static uint32_t undoStuff = 0;
         
+        RxTotalBits += (data_length * 16) / RxOversampling;
+        
         /* where to store the CAN frame data */
         uint8_t *buf = InterruptReceiveBuffers[ReceiveBuffersWriteNum];
         
@@ -333,6 +338,7 @@ extern "C"
                 else if(ReceiveBitNum > 0 && thisBit)
                 {
                     /* finish frame when line is going recessive for more than 8 bits */
+                    RxActiveBits += ReceiveBitNum;
                     ReceiveBitNum = 0;
                     ReceiveBuffersWriteNum = ((ReceiveBuffersWriteNum + 1) % CAN_RX_BUFFERS);
                     buf = InterruptReceiveBuffers[ReceiveBuffersWriteNum];
@@ -375,18 +381,18 @@ extern "C"
         if((this_exec_time - last_exec_time) < (160000000 / 2000))
         {
             can->StopI2S();
-            can->IntErrors++;
+            can->IntErrorCount++;
             can->_rxRunning = false;
             return;
         }
         
-        GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
+        //GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
         
         /* wait, that should not happen? */
         if(!slc_intr_status)
         {
             can->StopI2S();
-            can->IntErrors++;
+            can->IntErrorCount++;
             can->_rxRunning = false;
             return;
         }
@@ -418,13 +424,13 @@ extern "C"
         if(slc_intr_status)
         {
             can->StopI2S();
-            can->IntErrors++;
+            can->IntErrorCount++;
             can->_rxRunning = false;
             return;
         }
         last_exec_time = getCycleCount();
         
-        GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
+        //GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
     }
 }
 
@@ -475,15 +481,15 @@ void ESP8266Can::StartRx()
 
 void ESP8266Can::StartI2S()
 {
-	/* start transmission for RX and TX, no idea why both are needed */
+	/* start transmission for I2S_RX and SLC_TX */
 	SET_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
-	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START | I2S_I2S_TX_START);
+	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
 }
 
 void ESP8266Can::StopI2S()
 {
-	/* stop transmission for both RX and TX */
-	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START | I2S_I2S_TX_START);
+	/* stop transmission for both I2S_RX and SLC_TX */
+	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
 	CLEAR_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
 }
 
@@ -543,14 +549,14 @@ void ESP8266Can::InitI2S(void)
 	CLEAR_SET_REG_POS(I2SCONF, I2S_CLKM_DIV_NUM_S, I2S_CLKM_DIV_NUM, (bestClkmDiv)&I2S_CLKM_DIV_NUM);
     
     /* Select 16bits per channel (FIFO_MOD=0), no DMA access (FIFO only) */
-	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_TX_FIFO_MOD_S, I2S_I2S_TX_FIFO_MOD, 0);
-	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_TX_DATA_NUM_S, I2S_I2S_TX_DATA_NUM, 0);
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_RX_FIFO_MOD_S, I2S_I2S_RX_FIFO_MOD, 0);
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_RX_DATA_NUM_S, I2S_I2S_RX_DATA_NUM, 0);
     
     /* Enable SLC DMA in I2S subsystem */
 	CLEAR_SET_REG_POS(I2S_FIFO_CONF, 0, I2S_I2S_DSCR_EN, I2S_I2S_DSCR_EN);
     
     /* set dual channel data (CHAN_MOD=0) */
-	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_TX_CHAN_MOD_S, I2S_TX_CHAN_MOD, 0);
+	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_RX_CHAN_MOD_S, I2S_RX_CHAN_MOD, 3);
     
     /* ----------------- setup SLC ----------------- */
 
@@ -579,10 +585,19 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
     uint32_t startTime = millis();
     uint32_t loops = 0;
     
-    if(millis() - lastTime > 500)
+    if(millis() - lastTime > 1000)
     {
+        uint32_t old_ints = intDisable();
+        if(RxTotalBits)
+        {
+            BusLoadInternal = (RxActiveBits * 100 / (RxTotalBits + 1));
+            RxActiveBits = 0;
+            RxTotalBits = 0;
+        }
+        intEnable(old_ints);
+        
         lastTime = millis();
-        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrors);
+        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, Load: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount);
     }
     
     if(_rxStarted && !_rxRunning)
