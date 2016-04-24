@@ -380,7 +380,7 @@ extern "C"
             return;
         }
         
-        GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
+        //GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
         
         /* wait, that should not happen? */
         if(!slc_intr_status)
@@ -424,7 +424,7 @@ extern "C"
         }
         last_exec_time = getCycleCount();
         
-        GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
+        //GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
     }
 }
 
