@@ -11,7 +11,7 @@
 #define CAN_RX_BUFFER_SIZE (14) /* worst case: 1+11+3+4+64+15+1+2+10 bits */
 
 #define CAN_BUFFER_SIZE    (2048)  
-#define CAN_BUFFER_COUNT   (4)
+#define CAN_BUFFER_COUNT   (2)
 
 
 /* error/status codes for SendMessage and internal functions */
@@ -42,13 +42,19 @@ class ESP8266Can
 {
 public:
     ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx);
+    ~ESP8266Can();
+    
+    void StartRx();
+    void StopRx();
+    void Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack));
+    can_error_t SendMessage(uint16_t id, uint8_t length, uint8_t *data, bool req_remote = false, bool self_ack = true);
+
+    /* internal, make them private somewhen. ISR accesses some of them. */
     void StartI2S();
     void StopI2S();
+    void RestartI2S();
     void InitI2S();
-    void StartRx();
-    void Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack));
-    ~ESP8266Can();
-    can_error_t SendMessage(uint16_t id, uint8_t length, uint8_t *data, bool req_remote = false, bool self_ack = true);
+    
     void BuildCanFrame(uint8_t *buffer, uint16_t id, uint8_t length, uint8_t *data);
     uint32_t DecodeCanFrame(uint8_t *buffer, uint16_t *id, uint8_t *length, uint8_t *data, bool *req_remote, bool *ack, bool onlyBasic);
     

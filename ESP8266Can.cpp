@@ -380,22 +380,24 @@ extern "C"
         /* make sure we didn't run only half a msec ago */
         if((this_exec_time - last_exec_time) < (160000000 / 2000))
         {
-            can->StopI2S();
+            can->RestartI2S();
             can->IntErrorCount++;
-            can->_rxRunning = false;
             return;
         }
-        
-        //GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
+
+#ifdef ISR_TIMING        
+        GPIO_REG_WRITE(GPIO_OUT_W1TS_ADDRESS, _BV(can->LedPin));
+#endif
         
         /* wait, that should not happen? */
         if(!slc_intr_status)
         {
-            can->StopI2S();
+            can->RestartI2S();
             can->IntErrorCount++;
-            can->_rxRunning = false;
             return;
         }
+        
+        can->_rxRunning = true;
 
         /* the Tx interrupt handler, which is the data we RECEIVE. weird, ya. */
         if((slc_intr_status & SLC_TX_EOF_INT_ST))
@@ -423,14 +425,15 @@ extern "C"
         
         if(slc_intr_status)
         {
-            can->StopI2S();
+            can->RestartI2S();
             can->IntErrorCount++;
-            can->_rxRunning = false;
             return;
         }
         last_exec_time = getCycleCount();
         
-        //GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
+#ifdef ISR_TIMING        
+        GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
+#endif
     }
 }
 
@@ -473,10 +476,17 @@ void ESP8266Can::StartRx()
     
     memset(InterruptReceiveBuffers, 0x00, sizeof(InterruptReceiveBuffers));
     InitI2S();
-    StartI2S();
+    RestartI2S();
     _rxStarted = true;
-    _rxRunning = true;
     Serial.printf("Started\n");
+}
+
+void ESP8266Can::StopRx()
+{
+    StopI2S();
+    _rxStarted = false;
+    _rxRunning = false;
+    Serial.printf("Stopped\n");
 }
 
 void ESP8266Can::StartI2S()
@@ -491,6 +501,19 @@ void ESP8266Can::StopI2S()
 	/* stop transmission for both I2S_RX and SLC_TX */
 	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
 	CLEAR_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
+    
+    _rxRunning = false;
+}
+
+void ESP8266Can::RestartI2S()
+{
+    StopI2S();
+    
+    /* configure the first descriptors */
+	CLEAR_SET_REG_POS(SLC_TX_LINK, 0, SLC_TXLINK_DESCADDR_MASK, I2SQueueTx);
+    CurrentQueueItem = I2SQueueTx;
+    
+    StartI2S();
 }
 
 void ESP8266Can::PrepareQueue(const char *name, struct slc_queue_item *queue, uint32_t queueLength, void *buffer, uint32_t bufferLength, uint32_t eof)
@@ -598,13 +621,6 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
         
         lastTime = millis();
         Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, Load: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount);
-    }
-    
-    if(_rxStarted && !_rxRunning)
-    {
-        Serial.printf("[ESP8266Can] Restarting I2S\n");
-        StartRx();
-        Serial.printf("[ESP8266Can] Done\n");
     }
     
     /* dump CAN frames - to console for now */

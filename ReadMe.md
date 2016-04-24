@@ -29,8 +29,7 @@ the reason why it is better done in ISR context.
 ![Interrupt timing: High means ISR is running](/images/ISR_timing.png?raw=true "Interrupt timing: High means ISR is running")
 
 The SLC TX interrupt (yeah, SLC's Tx is for I2S Rx) is firing every 1.33 msec and executes
-725µs (idle) or 765µs (message received) which results in a CPU load of approx 54-57% 
-just for the Rx path.
+635µs (idle) to 705µs (message received) which results in a CPU load of approx 47-52% just for the Rx path.
 
 The good thing, the ISR is very stable in it's execution time and always is within the specified limits.
 
