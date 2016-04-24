@@ -54,6 +54,9 @@ extern "C"
     static uint32_t RxOversampling = 0;
     static uint8_t BitSamplingTable[128];
     
+    static uint32_t RxActiveBits = 0;
+    static uint32_t RxTotalBits = 0;
+    
     static uint32_t config_cyclesBit = 0;
     static uint32_t config_cyclesSample = 0;
     static uint32_t config_skip = 0;
@@ -246,6 +249,8 @@ extern "C"
         static uint32_t stuffEnd = 0xFFFFFFFF;
         static uint32_t undoStuff = 0;
         
+        RxTotalBits += (data_length * 16) / RxOversampling;
+        
         /* where to store the CAN frame data */
         uint8_t *buf = InterruptReceiveBuffers[ReceiveBuffersWriteNum];
         
@@ -333,6 +338,7 @@ extern "C"
                 else if(ReceiveBitNum > 0 && thisBit)
                 {
                     /* finish frame when line is going recessive for more than 8 bits */
+                    RxActiveBits += ReceiveBitNum;
                     ReceiveBitNum = 0;
                     ReceiveBuffersWriteNum = ((ReceiveBuffersWriteNum + 1) % CAN_RX_BUFFERS);
                     buf = InterruptReceiveBuffers[ReceiveBuffersWriteNum];
@@ -375,7 +381,7 @@ extern "C"
         if((this_exec_time - last_exec_time) < (160000000 / 2000))
         {
             can->StopI2S();
-            can->IntErrors++;
+            can->IntErrorCount++;
             can->_rxRunning = false;
             return;
         }
@@ -386,7 +392,7 @@ extern "C"
         if(!slc_intr_status)
         {
             can->StopI2S();
-            can->IntErrors++;
+            can->IntErrorCount++;
             can->_rxRunning = false;
             return;
         }
@@ -418,7 +424,7 @@ extern "C"
         if(slc_intr_status)
         {
             can->StopI2S();
-            can->IntErrors++;
+            can->IntErrorCount++;
             can->_rxRunning = false;
             return;
         }
@@ -579,10 +585,19 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
     uint32_t startTime = millis();
     uint32_t loops = 0;
     
-    if(millis() - lastTime > 500)
+    if(millis() - lastTime > 1000)
     {
+        uint32_t old_ints = intDisable();
+        if(RxTotalBits)
+        {
+            BusLoadInternal = (RxActiveBits * 100 / (RxTotalBits + 1));
+            RxActiveBits = 0;
+            RxTotalBits = 0;
+        }
+        intEnable(old_ints);
+        
         lastTime = millis();
-        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrors);
+        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, Load: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount);
     }
     
     if(_rxStarted && !_rxRunning)

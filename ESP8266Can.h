@@ -63,6 +63,7 @@ public:
     uint32_t RxErrAck = 0;
     uint32_t RxQueueOverflows = 0;
     uint32_t RxErrors() { return RxErrStuffBits + RxErrCrc + RxErrFormat + RxErrAck; }
+    uint32_t RxCount() { return RxSuccess; }
     
     /* error counters Tx path */
     uint32_t TxSuccess = 0;
@@ -72,8 +73,13 @@ public:
     uint32_t TxErrArbitration = 0;
     uint32_t TxErrCollision = 0;
     uint32_t TxErrors() { return TxErrLineBusy + TxErrTransceiver + TxErrNoAck + TxErrArbitration + TxErrCollision; }
+    uint32_t TxCount() { return TxSuccess; }
 
-    uint32_t IntErrors = 0;
+    uint32_t IntErrorCount = 0;
+    uint32_t IntErrors() { return IntErrorCount; }
+    uint32_t BusLoadInternal = 0;
+    uint32_t BusLoad() { return BusLoadInternal; }
+    
     uint32_t LedPin = 0;
     struct slc_queue_item *CurrentQueueItem = NULL;
     
