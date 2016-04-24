@@ -18,13 +18,17 @@ and can provide clean bit shape for up to 500 kBaud.
 
 The Rx path uses the (hardwired) I2SI_DATA IO pin GPIO12 with a bit rate of
 1.5 MBaud to get a 3x oversampling of the received bits.
+
 The received I2S bitstream is being processed in interrupt context, as the data 
 uses more than 3x it's net size. Processing raw I2S data in non-irq context thus
-would require a lot of additional RAM.
+would require a lot of additional RAM. Processing time in user context would be
+the same as in ISR context but due to RAM limitations, we could not delay 
+processing some reasonable time. So the deterministic nature of processing is
+the reason why it is better done in ISR context.
 
 ![Interrupt timing: High means ISR is running](/images/ISR_timing.png?raw=true "Interrupt timing: High means ISR is running")
 
-The I2S TX interrupt (yeah, TX is for I2SI) is firing every 1.33 msec and executes
+The SLC TX interrupt (yeah, SLC's Tx is for I2S Rx) is firing every 1.33 msec and executes
 725µs (idle) or 765µs (message received) which results in a CPU load of approx 54-57% 
 just for the Rx path.
 
