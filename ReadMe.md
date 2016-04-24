@@ -92,11 +92,12 @@ that the current descriptor (2k buffer) was filled and can be processed.
 This high interrupt load would block the user code from execution and causes a watchdog reset.
 
 To mitigate this (yet unidentified) problem, the code detects this situation and resets the I2S engine.
-This results in 1-2 2k-buffer drops and if we have 100% bus load, drops up to 100 CAN messages.
+This results in probably one buffer drop and if we have 100% bus load, drops up to 6 CAN messages.
 
 ![I2S error causing 100% load until I2S engine is restarted](/images/ISR_error.png?raw=true "I2S error")
 
 This happens after 904.000 to 905.000 IRQs, which transferred 1.852.416.000 bytes or 463.104.000 I2S stereo frames.
+With some code changes, it also sometimes happened after 10 minutes.
 
 ### No ACK for senders
 Because this code is using the I2S engine to asynchronously sample the CAN Rx path, there is no
