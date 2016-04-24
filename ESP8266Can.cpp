@@ -475,15 +475,15 @@ void ESP8266Can::StartRx()
 
 void ESP8266Can::StartI2S()
 {
-	/* start transmission for RX and TX, no idea why both are needed */
+	/* start transmission for I2S_RX and SLC_TX */
 	SET_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
-	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START | I2S_I2S_TX_START);
+	SET_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
 }
 
 void ESP8266Can::StopI2S()
 {
-	/* stop transmission for both RX and TX */
-	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START | I2S_I2S_TX_START);
+	/* stop transmission for both I2S_RX and SLC_TX */
+	CLEAR_PERI_REG_MASK(I2SCONF, I2S_I2S_RX_START);
 	CLEAR_PERI_REG_MASK(SLC_TX_LINK, SLC_TXLINK_START);
 }
 
@@ -543,14 +543,14 @@ void ESP8266Can::InitI2S(void)
 	CLEAR_SET_REG_POS(I2SCONF, I2S_CLKM_DIV_NUM_S, I2S_CLKM_DIV_NUM, (bestClkmDiv)&I2S_CLKM_DIV_NUM);
     
     /* Select 16bits per channel (FIFO_MOD=0), no DMA access (FIFO only) */
-	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_TX_FIFO_MOD_S, I2S_I2S_TX_FIFO_MOD, 0);
-	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_TX_DATA_NUM_S, I2S_I2S_TX_DATA_NUM, 0);
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_RX_FIFO_MOD_S, I2S_I2S_RX_FIFO_MOD, 0);
+	CLEAR_SET_REG_POS(I2S_FIFO_CONF, I2S_I2S_RX_DATA_NUM_S, I2S_I2S_RX_DATA_NUM, 0);
     
     /* Enable SLC DMA in I2S subsystem */
 	CLEAR_SET_REG_POS(I2S_FIFO_CONF, 0, I2S_I2S_DSCR_EN, I2S_I2S_DSCR_EN);
     
     /* set dual channel data (CHAN_MOD=0) */
-	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_TX_CHAN_MOD_S, I2S_TX_CHAN_MOD, 0);
+	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_RX_CHAN_MOD_S, I2S_RX_CHAN_MOD, 3);
     
     /* ----------------- setup SLC ----------------- */
 
