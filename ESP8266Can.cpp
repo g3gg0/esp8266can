@@ -555,8 +555,8 @@ void ESP8266Can::InitI2S(void)
     /* Enable SLC DMA in I2S subsystem */
 	CLEAR_SET_REG_POS(I2S_FIFO_CONF, 0, I2S_I2S_DSCR_EN, I2S_I2S_DSCR_EN);
     
-    /* set dual channel data (CHAN_MOD=0) */
-	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_RX_CHAN_MOD_S, I2S_RX_CHAN_MOD, 3);
+    /* set dual channel data (CHAN_MOD=0) but doesn't seem to have any effect */
+	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_RX_CHAN_MOD_S, I2S_RX_CHAN_MOD, 0);
     
     /* ----------------- setup SLC ----------------- */
 
