@@ -608,7 +608,7 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
     uint32_t startTime = millis();
     uint32_t loops = 0;
     
-    if(millis() - lastTime > 1000)
+    if(millis() - lastTime >= 1000)
     {
         uint32_t old_ints = intDisable();
         if(RxTotalBits)
@@ -619,7 +619,7 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
         }
         intEnable(old_ints);
         
-        lastTime = millis();
+        lastTime += 1000;
         Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, Load: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount);
     }
     
