@@ -81,6 +81,8 @@ public:
     uint32_t TxErrors() { return TxErrLineBusy + TxErrTransceiver + TxErrNoAck + TxErrArbitration + TxErrCollision; }
     uint32_t TxCount() { return TxSuccess; }
 
+    uint32_t IntLoadCount = 0;
+    uint32_t IntLoads() { return IntErrorCount; }
     uint32_t IntErrorCount = 0;
     uint32_t IntErrors() { return IntErrorCount; }
     uint32_t BusLoadInternal = 0;

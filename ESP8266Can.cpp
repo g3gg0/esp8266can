@@ -378,10 +378,10 @@ extern "C"
         uint32_t this_exec_time = getCycleCount();
         
         /* make sure we didn't run only half a msec ago */
-        if((this_exec_time - last_exec_time) < (160000000 / 2000))
+        if((this_exec_time - last_exec_time) < (160000000 / 1000 / 5))
         {
             can->RestartI2S();
-            can->IntErrorCount++;
+            can->IntLoadCount++;
             return;
         }
 
@@ -628,7 +628,7 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
         intEnable(old_ints);
         
         lastTime += 1000;
-        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, Load: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount);
+        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, Load: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d, Overloads: %d\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount, IntLoads());
     }
     
     /* dump CAN frames - to console for now */
