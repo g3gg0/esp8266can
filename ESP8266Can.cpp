@@ -64,6 +64,18 @@ extern "C"
     static uint32_t config_pinRegisterRx = 0;
     static const uint32_t config_lineFreeBitCount = 10;
 
+    
+    uint32_t time_since_int_avg = 0;
+    uint32_t time_since_int_min = 0xFFFFFFFF;
+    uint32_t time_since_int_max = 0;
+    uint32_t time_this_int_avg = 0;
+    uint32_t time_this_int_min = 0xFFFFFFFF;
+    uint32_t time_this_int_max = 0;
+    
+    #define STAT(val,var) do { var##_avg = (var##_avg + val) / 2; if(val > var##_max) { var##_max = val; } if(val < var##_min) { var##_min = val; } } while (0)
+    
+
+
     extern void rom_i2c_writeReg_Mask(uint32_t block, uint32_t host_id, uint32_t reg_add, uint32_t Msb, uint32_t Lsb, uint32_t indata);
 
     #define xt_ccount() (__extension__({uint32_t ccount; __asm__ __volatile__("rsr %0,ccount":"=a" (ccount)); ccount;}))
@@ -360,29 +372,38 @@ extern "C"
         }
     }
     
-    void processQueueItem(ESP8266Can *can) 
+    static void ICACHE_RAM_ATTR processQueueItem(ESP8266Can *can) 
     {
         /* go through all bits and count them, passing information to main loop context */
-        parseBuffer(can, (uint16_t *)can->CurrentQueueItem->buf_ptr, can->CurrentQueueItem->datalen / 2);
+        parseBuffer(can, (uint16_t *)can->CurrentQueueItem->buf_ptr, CAN_BUFFER_SIZE /*can->CurrentQueueItem->datalen*/ / 2);
         
-        can->CurrentQueueItem->owner = 1;
         can->CurrentQueueItem = (struct slc_queue_item *)can->CurrentQueueItem->next_link_ptr;
     }
     
     static void ICACHE_RAM_ATTR i2sInterrupt(ESP8266Can *can) 
     {
-        uint32_t slc_intr_status = READ_PERI_REG(SLC_INT_STATUS);
-        WRITE_PERI_REG(SLC_INT_CLR, 0xFFFFFFFF);
-        
         static uint32_t last_exec_time = 0;
         uint32_t this_exec_time = getCycleCount();
         
-        /* make sure we didn't run only half a msec ago */
-        if((this_exec_time - last_exec_time) < (160000000 / 1000 / 5))
+        /* first reset interrupt status */
+        uint32_t slc_intr_status = READ_PERI_REG(SLC_INT_STATUS);
+        WRITE_PERI_REG(SLC_INT_CLR, 0xFFFFFFFF);
+        
+        /* calc how long it took until we were fired again */
+        uint32_t since_last = this_exec_time - last_exec_time;
+        
+        /* update statistics */
+        if(last_exec_time > 0)
         {
-            can->RestartI2S();
-            can->IntLoadCount++;
-            return;
+            STAT(since_last,time_since_int);
+        
+            /* make sure we didn't run only half a msec ago */
+            if(since_last < (160000000 / 1000 / 5))
+            {
+                can->RestartI2S();
+                can->IntLoadCount++;
+                return;
+            }
         }
 
 #ifdef ISR_TIMING        
@@ -431,6 +452,10 @@ extern "C"
         }
         last_exec_time = getCycleCount();
         
+        /* update statistics */
+        uint32_t this_exec = last_exec_time - this_exec_time;
+        STAT(this_exec,time_this_int);
+        
 #ifdef ISR_TIMING        
         GPIO_REG_WRITE(GPIO_OUT_W1TC_ADDRESS, _BV(can->LedPin));
 #endif
@@ -475,10 +500,28 @@ void ESP8266Can::StartRx()
     }
     
     memset(InterruptReceiveBuffers, 0x00, sizeof(InterruptReceiveBuffers));
+    I2SBufferTxData = (uint8_t*)((uint32_t)malloc(CAN_BUFFER_SIZE * CAN_BUFFER_COUNT + 2 * CHECK_SIZE) + CHECK_SIZE);
+    
+    if(I2SBufferTxData == NULL)
+    {
+        Serial.printf("ESP8266Can::StartRx Could not allocate buffers\n");
+        return;
+    }
+    
+    if(CHECK_SIZE > 0)
+    {
+        uint8_t *ptr = (uint8_t*)((uint32_t)I2SBufferTxData - CHECK_SIZE);
+        for(int pos = 0; pos < CHECK_SIZE; pos++)
+        {
+            ptr[pos] = 0xAA;
+            ptr[CHECK_SIZE + CAN_BUFFER_SIZE * CAN_BUFFER_COUNT + pos] = 0xAA;
+        }
+    }
+    
     InitI2S();
     RestartI2S();
     _rxStarted = true;
-    Serial.printf("Started\n");
+    Serial.printf("ESP8266Can::StartRx Started\n");
 }
 
 void ESP8266Can::StopRx()
@@ -486,7 +529,7 @@ void ESP8266Can::StopRx()
     StopI2S();
     _rxStarted = false;
     _rxRunning = false;
-    Serial.printf("Stopped\n");
+    Serial.printf("ESP8266Can::StopRx Stopped\n");
 }
 
 void ESP8266Can::StartI2S()
@@ -524,10 +567,8 @@ void ESP8266Can::RestartI2S()
     StartI2S();
 }
 
-void ESP8266Can::PrepareQueue(const char *name, struct slc_queue_item *queue, uint32_t queueLength, void *buffer, uint32_t bufferLength, uint32_t eof)
+void ESP8266Can::PrepareQueue(const char *name, struct slc_queue_item *queue, uint32_t queueLength, void *buffer, uint32_t eof)
 {
-    int blockSize = bufferLength / queueLength;
-    
     /* prepare linked DMA descriptors, having EOF set for all */
     for(int num = 0; num < queueLength; num++)
     {
@@ -536,9 +577,9 @@ void ESP8266Can::PrepareQueue(const char *name, struct slc_queue_item *queue, ui
         queue[num].owner = 1;
         queue[num].eof = eof;
         queue[num].sub_sof = 0;
-        queue[num].datalen = blockSize;
-        queue[num].blocksize = blockSize;
-        queue[num].buf_ptr = (uint32_t)buffer + num * blockSize;
+        queue[num].datalen = CAN_BUFFER_SIZE;
+        queue[num].blocksize = CAN_BUFFER_SIZE;
+        queue[num].buf_ptr = (uint32_t)buffer + num * CAN_BUFFER_SIZE;
         queue[num].unused = 0;
         queue[num].next_link_ptr = (uint32_t)&queue[nextNum];
         
@@ -554,7 +595,7 @@ void ESP8266Can::InitI2S(void)
     /* ----------------- setup buffers ----------------- */
 
     /* prepare linked DMA descriptors, having EOF set for all RX slots */
-    PrepareQueue("I2SQueueTx", I2SQueueTx, COUNT(I2SQueueTx), I2SBufferTxData, sizeof(I2SBufferTxData), 1);
+    PrepareQueue("I2SQueueTx", I2SQueueTx, COUNT(I2SQueueTx), I2SBufferTxData, 1);
     CurrentQueueItem = I2SQueueTx;
     
     /* ----------------- setup IO ----------------- */
@@ -588,6 +629,9 @@ void ESP8266Can::InitI2S(void)
     
     /* set dual channel data (CHAN_MOD=0) but doesn't seem to have any effect */
 	CLEAR_SET_REG_POS(I2SCONF_CHAN, I2S_RX_CHAN_MOD_S, I2S_RX_CHAN_MOD, 0);
+    
+    /* I2S triggers the SLC DMA to finalize the current buffer and commit as "filled" */
+    WRITE_PERI_REG(I2SRXEOF_NUM, CAN_BUFFER_SIZE / 4);
     
     /* ----------------- setup SLC ----------------- */
 
@@ -628,7 +672,31 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
         intEnable(old_ints);
         
         lastTime += 1000;
-        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, Load: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, Timer: 0x%08X, Errors: %d, Overloads: %d\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount, IntLoads());
+        
+        uint32_t load = time_this_int_avg * 100 / (time_this_int_avg + time_since_int_avg);
+        uint32_t int_usec = time_this_int_avg / 160;
+        uint32_t rate_usec = (time_this_int_avg + time_since_int_avg) / 160;
+        
+        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, L: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, T: 0x%08X, Err: %d, Ovr: %d, Exec: %d us, Cycle: %d us, L: %d%%\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount, IntLoads(), int_usec, rate_usec, load);
+        
+        if(CHECK_SIZE > 0)
+        {
+            uint8_t *ptr = (uint8_t*)((uint32_t)I2SBufferTxData - CHECK_SIZE);
+            
+            for(int pos = 0; pos < CHECK_SIZE; pos++)
+            {
+                if(ptr[pos] != 0xAA)
+                {
+                    Serial.printf("[ESP8266Can] Memory check start failed!");
+                    break;
+                }
+                if(ptr[CHECK_SIZE + CAN_BUFFER_SIZE * CAN_BUFFER_COUNT + pos] != 0xAA)
+                {
+                    Serial.printf("[ESP8266Can] Memory check end failed!");
+                    break;
+                }
+            }
+        }
     }
     
     /* dump CAN frames - to console for now */

@@ -7,11 +7,18 @@
 /* per CANopen spec it's 87.5% at 500kbps some websites say :) */
 #define BIT_SAMPLING_POINT (15.0f)
 
-#define CAN_RX_BUFFERS     (64)
+#define CAN_RX_BUFFERS     (32)
 #define CAN_RX_BUFFER_SIZE (14) /* worst case: 1+11+3+4+64+15+1+2+10 bits */
 
-#define CAN_BUFFER_SIZE    (2048)  
+/* use how many buffers at which size for I2S raw data.
+   choose sizes 128..2048, dividable by 4
+     min: 128, guess because of I2S internal RX FIFO has a depth of 128 * 32 bits (=128 bytes)
+     max: SLC queue size is max 4096, but will crash with more than 2048
+   */
+#define CAN_BUFFER_SIZE    (128)  
 #define CAN_BUFFER_COUNT   (2)
+
+#define CHECK_SIZE         (0x40)
 
 
 /* error/status codes for SendMessage and internal functions */
@@ -106,8 +113,7 @@ public:
 private:
     /* n queue items share the whole buffer */
     struct slc_queue_item I2SQueueTx[CAN_BUFFER_COUNT];
-    uint8_t I2SBufferTxData[CAN_BUFFER_SIZE * CAN_BUFFER_COUNT];
-    
+    uint8_t *I2SBufferTxData;
     
     bool _debug = false; 
     uint32_t _rate; 
@@ -119,7 +125,7 @@ private:
     uint32_t pinRegisterTx() { return _BV(_gpio_tx); }
     uint32_t pinRegisterRx() { return _BV(_gpio_rx); }
 
-    void PrepareQueue(const char *name, struct slc_queue_item *queue, uint32_t queueLength, void *buffer, uint32_t bufferLength, uint32_t eof);
+    void PrepareQueue(const char *name, struct slc_queue_item *queue, uint32_t queueLength, void *buffer, uint32_t eof);
     void CalcCRCBit(uint16_t *crc, uint16_t bit);
     uint16_t CalcCRC(uint8_t *data, uint16_t startBit, uint16_t bitCount);
     uint32_t BuildCanFrame(uint8_t *buffer, uint16_t id, uint8_t length, uint8_t *data, bool req_remote, bool self_ack);
