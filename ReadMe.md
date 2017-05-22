@@ -14,6 +14,7 @@ For timing reasons, the Tx code is disabling interrupts for the time being in
 * busy detection,
 * arbitration,
 * and transmit phase
+
 and can provide clean bit shape for up to 500 kBaud.
 
 The Rx path uses the (hardwired) I2SI_DATA IO pin GPIO12 with a bit rate of
@@ -107,7 +108,7 @@ Troublesome for devices which insist on ACK and it is the only device on the bus
 
 ### Incomplete code
 This code is most probably not perfect. It may miss some essential stuff I didnt think of.
-As it is not (yet) 100% tested in a productional environment, it could cause severe bugs.
+As it is not (yet) 100% tested in a productional environment, it could contain annoying bugs.
 
 It does not handle:
 
