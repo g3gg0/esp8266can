@@ -42,7 +42,11 @@ extern "C"
     #include "eagle_soc.h"
     #include "esp8266_peri.h"
     #include "slc_register.h"
+    #include <cont.h>
         
+        
+    extern cont_t g_cont;
+    
     /* intentionally keeping them as global variable because having them in class makes the code slower. 
        Defining as class members has no benefit as we can only be instanciated once anyway. */
     static uint8_t InterruptReceiveBuffers[CAN_RX_BUFFERS][CAN_RX_BUFFER_SIZE];
@@ -101,7 +105,9 @@ extern "C"
         uint32_t old_ints = intDisable();
         
         /* wait till timer overflows */
-        while(getCycleCount() > (0xFFFFFFFF - ((121 + config_lineFreeBitCount + 10 /* backup */) * config_cyclesBit)));
+        while(getCycleCount() > (0xFFFFFFFF - ((121 + config_lineFreeBitCount + 10 /* backup */) * config_cyclesBit)))
+        {
+        }
         
         uint32_t ackSlot = bits - 8;
         uint32_t cyclesStart = getCycleCount();
@@ -372,13 +378,36 @@ extern "C"
         }
     }
     
-    static void ICACHE_RAM_ATTR processQueueItem(ESP8266Can *can) 
+    static int ICACHE_RAM_ATTR processQueue(ESP8266Can *can)
     {
-        /* go through all bits and count them, passing information to main loop context */
-        parseBuffer(can, (uint16_t *)can->CurrentQueueItem->buf_ptr, CAN_BUFFER_SIZE /*can->CurrentQueueItem->datalen*/ / 2);
+        /* pick up the next queue item and ensure it is free */
+        struct slc_queue_item *ptr = (struct slc_queue_item *)can->CurrentQueueItem->next_link_ptr;
+        uint32_t startTime = millis();
+        uint32_t processed = 0;
+    
+        do
+        {
+            if(ptr->owner == 0)
+            {
+                parseBuffer(can, (uint16_t *)ptr->buf_ptr, can->CurrentQueueItem->datalen / 2);
+                ptr->owner = 1;
+                processed++;
+            }
+            
+            /* make sure we process at least two buffers, but if we go over 5 msec, return */
+            if(millis() - startTime >= 5)
+            {
+                startTime = millis();
+                ESP.wdtFeed();
+                yield();
+            }
+            
+            ptr = (struct slc_queue_item *)ptr->next_link_ptr;
+        } while(ptr != can->CurrentQueueItem);
         
-        can->CurrentQueueItem = (struct slc_queue_item *)can->CurrentQueueItem->next_link_ptr;
+        return processed;
     }
+    
     
     static void ICACHE_RAM_ATTR i2sInterrupt(ESP8266Can *can) 
     {
@@ -433,14 +462,17 @@ extern "C"
             
             if(completed)
             {
-                /* go through all previous items */
-                while(can->CurrentQueueItem != completed)
-                {
-                    processQueueItem(can);
-                }
+                /* tag this received one as "to be processed" */
+                completed->owner = 0;
                 
-                /* and the finished ones */
-                processQueueItem(can);
+                /* update what the current written buffer is */
+                can->CurrentQueueItem = (struct slc_queue_item *)completed->next_link_ptr;
+                
+                /* will the next one be free? */
+                if(can->CurrentQueueItem->owner != 0x01)
+                {
+                    can->IntLoadCount++;
+                }
             }
         }
         
@@ -466,7 +498,7 @@ ESP8266Can::ESP8266Can(uint32_t rate, uint8_t gpio_tx, uint8_t gpio_rx) :
     _rate(rate), 
     _gpio_tx(gpio_tx), 
     _gpio_rx(gpio_rx),
-    _maxTries(100)
+    _maxTries(500)
 {
     digitalWrite(_gpio_tx, HIGH);
     pinMode(_gpio_rx, INPUT);
@@ -657,8 +689,12 @@ void ESP8266Can::InitI2S(void)
 void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t *payload, bool ack))
 {
     static uint32_t lastTime = 0;
+    static uint32_t processed = 0;
     uint32_t startTime = millis();
     uint32_t loops = 0;
+    
+    /* this may take a while */
+    processed += processQueue(this);
     
     if(millis() - lastTime >= 1000)
     {
@@ -677,7 +713,7 @@ void ESP8266Can::Loop(void (*cbr)(uint16_t id, bool req, uint8_t length, uint8_t
         uint32_t int_usec = time_this_int_avg / 160;
         uint32_t rate_usec = (time_this_int_avg + time_since_int_avg) / 160;
         
-        Serial.printf("[ESP8266Can] [%08d] Rx: %d, Tx: %d, L: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, T: 0x%08X, Err: %d, Ovr: %d, Exec: %d us, Cycle: %d us, L: %d%%\n", lastTime, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount, IntLoads(), int_usec, rate_usec, load);
+        Serial.printf("[ESP8266Can] [%08d] P: %d, Rx: %d, Tx: %d, L: %d%%  |  RxQueueErr: %d, RxErr: %d, TxErr: %d  |  IRQs: %d, T: 0x%08X, Err: %d, Ovr: %d, Exec: %d us, Cycle: %d us, L: %d%%, Heap: %u, Stack: %u\n", lastTime, processed, RxSuccess, TxSuccess, BusLoadInternal, RxQueueOverflows, RxErrors(), TxErrors(), InterruptTxCount + InterruptRxCount, getCycleCount(), IntErrorCount, IntLoads(), int_usec, rate_usec, load, ESP.getFreeHeap(), cont_get_free_stack(&g_cont));
         
         if(CHECK_SIZE > 0)
         {
@@ -907,6 +943,7 @@ can_error_t ESP8266Can::SendMessage(uint16_t id, uint8_t length, uint8_t *data, 
             Serial.printf("[CAN] Send ID:0x%03X, %d byte: ", id, length);            
         }
         
+        #if 0
         /* first wait for the interrupt doing it's work. might still have some jitter but should do its job most of the time. */
         if(_rxRunning)
         {
@@ -914,9 +951,11 @@ can_error_t ESP8266Can::SendMessage(uint16_t id, uint8_t length, uint8_t *data, 
     
             while(lastCurrentQueueItem == CurrentQueueItem)
             {
+                
                 ESP.wdtFeed();
             }
         }
+        #endif
         
         /* now, probably right after the interrupt, send the data to be sent */
         can_error_t bitPos = sendRawData(buffer, bits);

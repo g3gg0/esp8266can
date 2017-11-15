@@ -15,8 +15,8 @@
      min: 128, guess because of I2S internal RX FIFO has a depth of 128 * 32 bits (=128 bytes)
      max: SLC queue size is max 4096, but will crash with more than 2048
    */
-#define CAN_BUFFER_SIZE    (128)  
-#define CAN_BUFFER_COUNT   (2)
+#define CAN_BUFFER_SIZE    (1024)  
+#define CAN_BUFFER_COUNT   (8)
 
 #define CHECK_SIZE         (0x40)
 
